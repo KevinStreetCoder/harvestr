@@ -66,9 +66,21 @@ camcaps.tv · camcaps.io · camstreams.tv · porntrex · camsrip · recordbate �
 archivebate · recu.me
 
 ### Creator / leak mirrors (no subscription needed)
-- **Coomer.st** — OnlyFans / Fansly / CandFans mirror
+- **Leakedzone.com** ✨ — OnlyFans / IG / Snap archive with HLS video streams
+  (served from the main domain — bypasses the Coomer CDN outage)
+- **Fapello.com** ✨ — OnlyFans / IG / Snap archive with deterministic numbered posts
+- **Coomer.st** — OnlyFans / Fansly / CandFans mirror (auto-recovers when their
+  CDN subnet comes back — see *Coomer outage* below)
 - **Kemono.cr** — Patreon / Fanbox / Gumroad / SubscribeStar / Fantia / Boosty / Discord / DLSite mirror
 - **RedGifs** — v2 API, auto-acquired temp token
+
+> **⚠️ Coomer CDN outage (April 2026):** The `91.149.227.0/24` subnet that hosts
+> Coomer's sharded video CDN (`n1-n4.coomer.st`) is globally null-routed. Metadata
+> still works (profile pages, post counts, post titles) but video downloads time
+> out. Harvestr has a **fast-fail pre-flight health check** that detects this
+> and routes around Coomer for you — and the new **Leakedzone + Fapello**
+> scrapers cover the same OnlyFans-archive content from unaffected infrastructure.
+> Full analysis: [`research/coomer_alternatives_2026.md`](research/coomer_alternatives_2026.md).
 
 ### Full list
 ```powershell
@@ -316,9 +328,30 @@ times out.
 
 ## Research & reference
 
-See **[research/platforms_research.md](research/platforms_research.md)** for
-a deep dive on each platform's auth model, API quirks, rate limits, and the
-recommended integration approach.
+- **[research/coomer_alternatives_2026.md](research/coomer_alternatives_2026.md)** —
+  deep dive on the Coomer BGP outage of April 2026, ranked alternatives with
+  reachability data, and the reverse-engineered Leakedzone video-URL
+  obfuscation scheme (cracked from scratch — documented with the decoder)
+- **[research/platforms_research.md](research/platforms_research.md)** —
+  per-platform auth model, API quirks, rate limits, and recommended
+  integration approach (X.com, OnlyFans, Fansly, Patreon, etc.)
+
+## Coomer / Leakedzone / Fapello — which one runs first?
+
+When you run Harvestr for an OnlyFans creator, all three scrapers probe in
+parallel. Order of preference at download time:
+
+1. **Leakedzone** — HLS streams over `leakedzone.com` main domain. Reachable
+   from networks where Coomer is blocked. Single-pass decoder pulls fresh
+   signed URLs → ffmpeg immediately (URLs expire in ~5 min).
+2. **Fapello** — best for photo archives. Most creators on Fapello are
+   image-only (Harvestr skips images), so it's often 0 videos in practice.
+3. **Coomer** — when its CDN is up, wins on coverage. CDN-health pre-check
+   short-circuits the 200+ video attempts when Coomer is down.
+4. **Kemono** — Patreon/Fanbox content (different scope than the OF trio).
+
+Cross-mirror dedup handles the common case of a single video appearing on
+multiple sources — you'll only ever end up with one copy on disk.
 
 ---
 

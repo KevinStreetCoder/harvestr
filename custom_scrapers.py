@@ -2469,6 +2469,369 @@ class CamSmut(SiteScraper):
             return False
 
 
+# ── Fapello.com (OF/IG/Snap archive, deterministic numbered posts) ───────────
+
+class Fapello(SiteScraper):
+    """fapello.com — OnlyFans/Instagram/Snapchat archive mirror.
+
+    Why this scraper exists: Coomer's CDN (91.149.227.0/24) went BGP-null-route
+    in April 2026, leaving Harvestr with no OF/Fansly source. Fapello is the
+    most resilient no-auth alternative:
+
+      - Profile: https://fapello.com/{slug}/            (slug = username, no _)
+      - Per-post: https://fapello.com/{slug}/{N}/       (N = 1..total_posts)
+      - Image CDN: https://fapello.com/content/{c1}/{c2}/{slug}/1000/{slug}_NNNN.jpg
+        where c1,c2 are the first two chars of slug
+      - Video CDN: same pattern, .mp4 extension
+      - Domain hops: historically .com → .cc → .io → .su; keep .com unless dead.
+    """
+    NAME = "fapello"
+    BASE_URL = "https://fapello.com"
+    CATEGORY = "mirror"   # OF/IG archive — grouped with coomer/kemono in UI
+    MIN_ENTRIES = 1
+    AUTHORITATIVE_USER = True   # URL path is username-gated → no slug filter
+
+    def _slug_variants(self, username: str) -> List[str]:
+        """Fapello uses username-without-underscores. blondie_254 → blondie254."""
+        out: List[str] = []
+        for v in (username, username.replace("_", ""), username.replace("_", "-"),
+                  username.lower(), username.lower().replace("_", ""),
+                  username.lower().replace("_", "-")):
+            if v and v not in out:
+                out.append(v)
+        return out
+
+    def probe(self, username: str) -> Optional[ProbeHit]:
+        for slug in self._slug_variants(username):
+            url = f"{self.BASE_URL}/{slug}/"
+            try:
+                r = self.session.get(url, timeout=15, allow_redirects=True)
+            except Exception as e:
+                self.log.debug(f"  [{self.NAME}] probe {slug}: {e}")
+                continue
+            if r.status_code != 200:
+                continue
+            # Real profile pages reference per-post URLs /{slug}/N/
+            posts = set(re.findall(
+                rf'href="(?:https?://[^/]*fapello[^/]+)?/{re.escape(slug)}/(\d+)/?"',
+                r.text,
+            ))
+            if not posts:
+                continue
+            return ProbeHit(
+                site=self.NAME, url=url, entry_count=len(posts),
+                uploader_id=slug,
+            )
+        return None
+
+    def enumerate(self, hit: ProbeHit, username: str, limit: int) -> List[VideoRef]:
+        slug = hit.uploader_id or username
+        videos: List[VideoRef] = []
+        seen: set = set()
+        # Walk pagination /page/N/ until we stop finding new posts
+        for page in range(1, 50):
+            url = f"{self.BASE_URL}/{slug}/" if page == 1 else f"{self.BASE_URL}/{slug}/page/{page}/"
+            try:
+                r = self.session.get(url, timeout=15)
+            except Exception:
+                break
+            if r.status_code != 200:
+                break
+            post_ids = sorted(set(re.findall(
+                rf'href="(?:https?://[^/]*fapello[^/]+)?/{re.escape(slug)}/(\d+)/?"',
+                r.text,
+            )), key=int)
+            new_on_page = 0
+            for pid in post_ids:
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                new_on_page += 1
+                videos.append(VideoRef(
+                    site=self.NAME,
+                    video_id=f"{slug}_{pid}",
+                    video_url=f"{self.BASE_URL}/{slug}/{pid}/",
+                    title=f"{slug}_{pid}",
+                    performer=username,
+                    uploader_id=slug,
+                ))
+                if limit and len(videos) >= limit:
+                    return videos
+            if new_on_page == 0:
+                break
+            time.sleep(0.4)
+        return videos
+
+    def extract_stream(self, video: VideoRef) -> bool:
+        """Fetch the post page and extract the direct media URL from
+        <source src="..."> / <video src="..."> / <img src="..."> tags.
+
+        Fapello serves video as .mp4 and images as .jpg/.png from their own
+        CDN path /content/{c1}/{c2}/{slug}/1000/{slug}_NNNN.{ext}. We only
+        return videos — skip images (Harvestr is a video downloader)."""
+        try:
+            r = self.session.get(video.video_url, timeout=15,
+                                 headers={"Referer": f"{self.BASE_URL}/"})
+        except Exception as e:
+            self.log.debug(f"  [{self.NAME}] post fetch: {e}")
+            return False
+        if r.status_code == 404:
+            video.stream_kind = "private"
+            return False
+        if r.status_code != 200:
+            return False
+
+        # Look for a direct .mp4 URL first (video posts)
+        mp4s = re.findall(
+            r'(?:src|data-src)=["\'](https?://[^"\']+?\.mp4[^"\']*)["\']',
+            r.text, re.IGNORECASE,
+        )
+        if mp4s:
+            video.stream_url = mp4s[0]
+            video.stream_kind = "mp4"
+            video.stream_headers = {
+                "User-Agent": USER_AGENT,
+                "Referer": video.video_url,
+            }
+            return True
+
+        # If the post is image-only, mark as skip (we are a video downloader)
+        imgs = re.findall(
+            r'<img[^>]+src=["\'](https?://[^"\']+fapello\.[a-z]+/content/[^"\']+)["\']',
+            r.text, re.IGNORECASE,
+        )
+        if imgs:
+            # Try to find a matching .mp4 (sometimes the gallery swaps out
+            # the image src for a video at play time)
+            guess = re.sub(r"\.(jpg|png|webp)($|\?)", r".mp4\2", imgs[0], flags=re.I)
+            if guess != imgs[0]:
+                try:
+                    h = self.session.head(guess, timeout=8, allow_redirects=True)
+                    if h.status_code == 200 and "video" in (h.headers.get("Content-Type","").lower()):
+                        video.stream_url = guess
+                        video.stream_kind = "mp4"
+                        video.stream_headers = {
+                            "User-Agent": USER_AGENT,
+                            "Referer": video.video_url,
+                        }
+                        return True
+                except Exception:
+                    pass
+            video.stream_kind = "private"   # image-only, treat as skip
+            return False
+        return False
+
+
+# ── Leakedzone.com (OF/IG archive, obfuscated m3u8 URLs) ─────────────────────
+
+class Leakedzone(SiteScraper):
+    """leakedzone.com — OnlyFans/Snap/IG leak archive with per-creator pages
+    and HLS video streams. Works well from networks where Coomer's CDN is
+    null-routed, because Leakedzone serves m3u8 directly from the main
+    domain (no shard CDN).
+
+    Architecture:
+      - Profile:       /{username}          (mixed photos + videos)
+      - Video listing: /{username}/video    (48 per page, paginated ?page=N)
+      - Per video:     /{username}/video/{video_id}   (mostly identical HTML)
+      - Each <a>-card has  data-video="{&quot;source&quot;:[...]}"  (HTML-entity
+        encoded JSON). src value is obfuscated:
+
+            base64-encode( <16 bytes of junk> + "https://.../<id>.m3u8?sig=..." )
+            → then reverse the whole string
+
+        To decode: reverse → base64 decode → strip junk by finding "http" →
+        take until first control char. Stream URLs are time-signed (short TTL),
+        so we enumerate + extract in ONE PASS instead of lazy extract_stream.
+    """
+    NAME = "leakedzone"
+    BASE_URL = "https://leakedzone.com"
+    CATEGORY = "mirror"
+    MIN_ENTRIES = 1
+    AUTHORITATIVE_USER = True
+
+    # The video grid has an <a href="/{slug}/video/{id}"> wrapping element,
+    # and the data-video (with obfuscated URL JSON) is on a descendant tag.
+    # We find each anchor separately, then look in a forward window for the
+    # matching data-video. ~3 KB forward is enough (the card template is
+    # tight HTML).
+    HREF_RE = re.compile(
+        r'href="(/[^/"]+/video/([^"]+))"', re.IGNORECASE,
+    )
+    DATA_VIDEO_RE = re.compile(
+        r'data-video="([^"]+)"', re.IGNORECASE,
+    )
+
+    def _make_session(self) -> requests.Session:
+        s = super()._make_session()
+        s.headers["Accept-Language"] = "en-US,en;q=0.9"
+        return s
+
+    def probe(self, username: str) -> Optional[ProbeHit]:
+        for slug in (username, username.lower(),
+                     username.replace("_", "-"), username.replace("-", "_")):
+            url = f"{self.BASE_URL}/{slug}/video"
+            try:
+                r = self.session.get(url, timeout=15)
+            except Exception as e:
+                self.log.debug(f"  [{self.NAME}] probe {slug}: {e}")
+                continue
+            if r.status_code != 200:
+                continue
+            posts = set(re.findall(
+                rf'href="(/{re.escape(slug)}/video/[^"]+)"', r.text,
+            ))
+            if not posts:
+                continue
+            return ProbeHit(
+                site=self.NAME, url=url, entry_count=len(posts),
+                uploader_id=slug,
+            )
+        return None
+
+    @staticmethod
+    def _decode_obfuscated_url(encoded: str) -> str:
+        """Leakedzone video URL obfuscation:
+
+            enc = base64( <junk> + url ) then reverse
+
+        Reverse → base64-decode → the decoded bytes contain junk + URL.
+        Find "http" / "https" in the bytes and slice from there to the
+        first control / quote character.
+        """
+        reversed_enc = encoded[::-1]
+        for extra_pad in range(4):
+            try:
+                raw = _base64.b64decode(reversed_enc + "=" * extra_pad,
+                                        validate=False)
+            except Exception:
+                continue
+            for marker in (b"https://", b"http://"):
+                idx = raw.find(marker)
+                if idx == -1:
+                    continue
+                tail = raw[idx:]
+                end = len(tail)
+                for i, c in enumerate(tail):
+                    if c < 0x20 or c in (0x22, 0x27, 0x3c, 0x3e, 0x20):
+                        end = i; break
+                try:
+                    return tail[:end].decode("utf-8")
+                except UnicodeDecodeError:
+                    return tail[:end].decode("utf-8", errors="replace")
+        return ""
+
+    def enumerate(self, hit: ProbeHit, username: str, limit: int) -> List[VideoRef]:
+        slug = hit.uploader_id or username
+        videos: List[VideoRef] = []
+        seen: set = set()
+        for page in range(1, 50):
+            url = hit.url if page == 1 else f"{hit.url}?page={page}"
+            try:
+                r = self.session.get(url, timeout=15)
+            except Exception:
+                break
+            if r.status_code != 200:
+                break
+            text = r.text
+
+            # Collect (href_start_offset, path, vid) for every card link
+            href_hits = [(m.start(), m.group(1), m.group(2))
+                         for m in self.HREF_RE.finditer(text)
+                         if f"/{slug}/video/" in m.group(1)]
+            # Collect data-video attrs with their offsets
+            dv_hits = [(m.start(), m.group(1)) for m in self.DATA_VIDEO_RE.finditer(text)]
+
+            new_on_page = 0
+            for offset, path, vid in href_hits:
+                if vid in seen:
+                    continue
+                # Find the FIRST data-video whose offset is AFTER this href
+                # (cards are ordered top-to-bottom in the HTML)
+                data_video = None
+                for dv_off, dv_val in dv_hits:
+                    if dv_off > offset:
+                        # Guard: the data-video must be within ~6 KB of the href
+                        if dv_off - offset < 6000:
+                            data_video = dv_val
+                        break
+                if not data_video:
+                    continue
+                seen.add(vid); new_on_page += 1
+
+                raw = data_video.replace("&quot;", '"').replace("&amp;", "&")
+                stream_url = ""
+                try:
+                    obj = json.loads(raw)
+                    for src in obj.get("source", []):
+                        decoded = self._decode_obfuscated_url(src.get("src", ""))
+                        if decoded:
+                            stream_url = decoded
+                            break
+                except Exception as e:
+                    self.log.debug(f"  [{self.NAME}] data-video parse {vid}: {e}")
+
+                ref = VideoRef(
+                    site=self.NAME,
+                    video_id=vid,
+                    video_url=f"{self.BASE_URL}{path}",
+                    title=f"{slug}_{vid}",
+                    performer=username,
+                    uploader_id=slug,
+                )
+                if stream_url:
+                    ref.stream_url = stream_url
+                    ref.stream_kind = "hls" if ".m3u8" in stream_url else "mp4"
+                    ref.stream_headers = {
+                        "User-Agent": USER_AGENT,
+                        "Referer": ref.video_url,
+                    }
+                videos.append(ref)
+                if limit and len(videos) >= limit:
+                    return videos
+            if new_on_page == 0:
+                break
+            time.sleep(0.5)
+        return videos
+
+    def extract_stream(self, video: VideoRef) -> bool:
+        """The stream URL is already populated during enumerate (single-pass).
+        This handles the edge case where a ref was serialized / cached without
+        its stream URL — re-fetch the per-video page and decode fresh."""
+        if video.stream_url:
+            return True
+        try:
+            r = self.session.get(video.video_url, timeout=15,
+                                 headers={"Referer": f"{self.BASE_URL}/"})
+        except Exception as e:
+            self.log.debug(f"  [{self.NAME}] page fetch: {e}")
+            return False
+        if r.status_code == 404:
+            video.stream_kind = "private"
+            return False
+        if r.status_code != 200:
+            return False
+        m = self.DATA_VIDEO_RE.search(r.text)
+        if not m:
+            return False
+        raw = m.group(1).replace("&quot;", '"').replace("&amp;", "&")
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            return False
+        for src in obj.get("source", []):
+            decoded = self._decode_obfuscated_url(src.get("src", ""))
+            if decoded:
+                video.stream_url = decoded
+                video.stream_kind = "hls" if ".m3u8" in decoded else "mp4"
+                video.stream_headers = {
+                    "User-Agent": USER_AGENT,
+                    "Referer": video.video_url,
+                }
+                return True
+        return False
+
+
 # ── Registry ──────────────────────────────────────────────────────────────
 
 ALL_SCRAPER_CLASSES = [
@@ -2486,6 +2849,9 @@ ALL_SCRAPER_CLASSES = [
     CamCapsIO,
     # Subscription-platform mirrors (OnlyFans/Fansly/Patreon content, NO auth needed)
     Coomer, Kemono,
+    # Coomer alternatives — CDN-resilient, added April 2026 after coomer.st
+    # went BGP null-route. See research/platforms_research.md for context.
+    Fapello, Leakedzone,
     # Mainstream with API
     RedGifs, RedditUser,
     # Auth-required (only activates if cookies_file is set with valid cookies)

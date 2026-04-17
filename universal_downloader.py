@@ -965,6 +965,9 @@ class UniversalDownloader:
 
         out: List[VideoRef] = []
         for cv in vids:
+            # Preserve stream fields if the scraper already resolved them
+            # (single-pass scrapers like Leakedzone populate stream_url
+            # during enumerate so the per-video page isn't fetched twice).
             out.append(VideoRef(
                 site=cv.site,
                 video_id=cv.video_id,
@@ -974,9 +977,9 @@ class UniversalDownloader:
                 uploader_id=cv.uploader_id,
                 duration=cv.duration or 0.0,
                 performer=performer,
-                stream_url="",    # populated later on demand
-                stream_kind="",
-                stream_headers={},
+                stream_url=getattr(cv, "stream_url", "") or "",
+                stream_kind=getattr(cv, "stream_kind", "") or "",
+                stream_headers=dict(getattr(cv, "stream_headers", {}) or {}),
                 is_custom=True,
             ))
         return out

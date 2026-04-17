@@ -712,6 +712,7 @@ INDEX_HTML = r"""
         <tr><td>Rate limit</td><td><input id="cfg-rate" type="text" placeholder="e.g. 500K, 2M, blank = unlimited"/></td></tr>
         <tr><td>Cookies file</td><td><input id="cfg-cookies" type="text" placeholder="Path to cookies.txt (Netscape)"/></td></tr>
         <tr><td>Impersonate</td><td><input id="cfg-imp" type="text" placeholder="chrome"/></td></tr>
+        <tr><td>Download proxy</td><td><input id="cfg-proxy" type="text" placeholder="http://host:port, socks5://127.0.0.1:9150 (Tor), blank = none"/></td></tr>
         <tr><td>CamSmut user</td><td><input id="cfg-cs-user" type="text" placeholder="(empty = skip camsmut)"/></td></tr>
         <tr><td>CamSmut password</td><td><input id="cfg-cs-pass" type="password" placeholder=""/></td></tr>
       </table>
@@ -1000,6 +1001,7 @@ async function loadConfig() {
   g('cfg-rate').value = _config.rate_limit || '';
   g('cfg-cookies').value = _config.cookies_file || '';
   g('cfg-imp').value = _config.impersonate_target || '';
+  g('cfg-proxy').value = _config.download_proxy || '';
   g('cfg-cs-user').value = _config.camsmut_username || '';
   g('cfg-cs-pass').value = _config.camsmut_password || '';
   renderPerformers();
@@ -1147,6 +1149,7 @@ async function saveSettings() {
     rate_limit: g('cfg-rate').value,
     cookies_file: g('cfg-cookies').value,
     impersonate_target: g('cfg-imp').value,
+    download_proxy: g('cfg-proxy').value,
     camsmut_username: g('cfg-cs-user').value,
     camsmut_password: g('cfg-cs-pass').value,
   };

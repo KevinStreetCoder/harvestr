@@ -226,6 +226,13 @@ class UniversalConfig:
     # Site-specific credentials (login for camsmut etc.)
     camsmut_username: str = ""
     camsmut_password: str = ""
+    # HTTP(S)/SOCKS proxy — applied to aria2c + curl download phase when set.
+    # Useful when the CDN hosts used by Coomer / Kemono mirrors are IP-blocked
+    # by your ISP; route through a VPN or proxy.  Format:
+    #   http://user:pass@host:port
+    #   socks5://127.0.0.1:9150            (Tor)
+    #   http://127.0.0.1:8080              (local Squid / HTTP proxy)
+    download_proxy: str = ""
 
     @classmethod
     def load(cls, path: Path) -> "UniversalConfig":
@@ -1135,6 +1142,8 @@ class UniversalDownloader:
             "--check-certificate=false",
             f"--user-agent={v.stream_headers.get('User-Agent', custom_scrapers.USER_AGENT)}",
         ]
+        if self.config.download_proxy:
+            cmd.append(f"--all-proxy={self.config.download_proxy}")
         ref = v.stream_headers.get("Referer", "")
         if ref:
             cmd.append(f"--referer={ref}")
@@ -1205,6 +1214,8 @@ class UniversalDownloader:
             "--speed-limit", "1024", "--speed-time", "60",
             "-H", f"User-Agent: {v.stream_headers.get('User-Agent', custom_scrapers.USER_AGENT)}",
         ]
+        if self.config.download_proxy:
+            cmd += ["--proxy", self.config.download_proxy]
         ref = v.stream_headers.get("Referer", "")
         if ref:
             cmd += ["-H", f"Referer: {ref}"]

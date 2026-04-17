@@ -928,24 +928,33 @@ class UniversalDownloader:
         # for Macy2000, and "Blondie.Lilllie" / "Kjbennet-blondie-fuck" etc.
         # when searching for "blondie_254".
         #
-        # Applied to ALL custom-scraper enumerations — even /tags/ hits, because
-        # when a tag URL doesn't actually exist on the site, many KVS mirrors
-        # serve a fallback search-result page that matches the substring only
-        # (e.g. /tags/blondie_254/ returning every video tagged "blondie").
-        filtered = []
-        rejected = 0
-        for cv in vids:
-            slug_text = cv.video_url + " " + (cv.title or "") + " " + (cv.uploader or "")
-            if not custom_scrapers.video_title_matches_user(slug_text, performer):
-                rejected += 1
-                self.log.debug(f"  [{scraper.NAME}] reject '{performer}' mismatch: "
-                               f"{(cv.title or cv.video_id)[:60]} @ {cv.video_url[:80]}")
-                continue
-            filtered.append(cv)
-        if rejected:
-            self.log.info(f"  {scraper.NAME}: filtered {rejected} off-topic results "
-                         f"(URL/title didn't match '{performer}')")
-        vids = filtered
+        # SKIPPED for "authoritative" scrapers (Coomer, Kemono, RedGifs, Reddit,
+        # XCom) — these hit username-gated API endpoints so every returned video
+        # is guaranteed-by-URL to belong to the queried user. Their post titles
+        # are often emoji-only / opaque filenames that would falsely reject.
+        #
+        # Applied to ALL other custom-scraper enumerations — even /tags/ hits,
+        # because when a tag URL doesn't actually exist, many KVS mirrors silently
+        # fall back to a search that matches substrings only (e.g. /tags/blondie_254/
+        # returning every video tagged just "blondie").
+        if getattr(scraper, "AUTHORITATIVE_USER", False):
+            self.log.debug(f"  [{scraper.NAME}] authoritative user API — "
+                           f"skipping slug-match filter ({len(vids)} refs)")
+        else:
+            filtered = []
+            rejected = 0
+            for cv in vids:
+                slug_text = cv.video_url + " " + (cv.title or "") + " " + (cv.uploader or "")
+                if not custom_scrapers.video_title_matches_user(slug_text, performer):
+                    rejected += 1
+                    self.log.debug(f"  [{scraper.NAME}] reject '{performer}' mismatch: "
+                                   f"{(cv.title or cv.video_id)[:60]} @ {cv.video_url[:80]}")
+                    continue
+                filtered.append(cv)
+            if rejected:
+                self.log.info(f"  {scraper.NAME}: filtered {rejected} off-topic results "
+                             f"(URL/title didn't match '{performer}')")
+            vids = filtered
 
         out: List[VideoRef] = []
         for cv in vids:

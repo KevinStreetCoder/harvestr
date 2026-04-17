@@ -198,6 +198,14 @@ class SiteScraper(ABC):
     # Name of the cookie domain this scraper cares about (substring match against
     # cookie domains). If empty, all cookies loaded are used.
     COOKIE_DOMAIN: str = ""
+    # True when the scraper accesses a username-gated API endpoint (e.g. Coomer
+    # /api/v1/{service}/user/{u}/posts, RedGifs /v1/users/{u}, Reddit
+    # /user/{u}/submitted.json). For these, every returned video is
+    # guaranteed-by-URL to belong to the queried user, so the caller should
+    # skip the slug-match filter (which would reject legitimate content with
+    # opaque titles like "\ud83c\udf51\ud83c\udf46").
+    # KVS mirrors and search-based scrapers leave this False (default).
+    AUTHORITATIVE_USER: bool = False
 
     def __init__(self, log: logging.Logger, cookies_file: str = ""):
         self.log = log
@@ -1292,6 +1300,8 @@ class CoomerKemonoBase(SiteScraper):
     """
     CATEGORY = "adult"
     MIN_ENTRIES = 1
+    # Username-gated at the API level: /api/v1/{service}/user/{u}/posts.
+    AUTHORITATIVE_USER = True
     # List of services this mirror supports (e.g. onlyfans, fansly for coomer)
     SERVICES: List[str] = []
     # When True, resolve username -> numeric id via /api/v1/creators before probing.
@@ -1489,6 +1499,7 @@ class RedGifs(SiteScraper):
     BASE_URL = "https://api.redgifs.com"
     CATEGORY = "adult"
     MIN_ENTRIES = 1
+    AUTHORITATIVE_USER = True   # /v1/users/{u} is username-gated
 
     def _get_token(self) -> Optional[str]:
         """RedGifs requires a guest temporary token obtained via /v2/auth/temporary."""
@@ -1633,6 +1644,7 @@ class XCom(SiteScraper):
     USE_CLOUDSCRAPER = False
     MIN_ENTRIES = 1
     COOKIE_DOMAIN = "x.com"
+    AUTHORITATIVE_USER = True   # GraphQL UserMedia is keyed by rest_id
 
     BEARER = ("Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejR"
               "COuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA")
@@ -1862,6 +1874,7 @@ class RedditUser(SiteScraper):
     BASE_URL = "https://www.reddit.com"
     CATEGORY = "mainstream"
     MIN_ENTRIES = 1
+    AUTHORITATIVE_USER = True   # /user/{u}/submitted.json is username-gated
 
     def _make_session(self) -> requests.Session:
         s = super()._make_session()

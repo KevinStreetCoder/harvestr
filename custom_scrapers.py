@@ -2499,25 +2499,56 @@ def username_variants(username: str) -> List[str]:
 
 def video_title_matches_user(url_or_slug: str, username: str) -> bool:
     """Check if a video URL/slug/title plausibly belongs to `username`.
-    Used to filter out false positives from search-based scrapers."""
+    Used to filter out false positives from search-based scrapers
+    (e.g. /search/blondie_254/ returning every video with "Blondie" in the
+    title — Blondie.Lilllie, Kjbennet-blondie-fuck, etc.).
+
+    Strategy: the *full* username must appear as a unit somewhere in the
+    URL or title. We normalize separators (_, -, space) so "blondie_254",
+    "blondie-254" and "blondie254" all match interchangeably — but we do
+    NOT drop the distinguishing digits/suffix. A username with only a
+    common-word stem (e.g. "Blondie" → `blondie_254 → blondie`) would
+    otherwise swallow hundreds of unrelated videos.
+    """
     if not url_or_slug or not username:
         return True  # can't judge → allow
-    low_slug = url_or_slug.lower().replace("_", "-")
-    low_user = username.lower().replace("_", "-")
-    # Direct containment
-    if low_user in low_slug:
-        return True
-    # Stem without trailing digits
-    stem = re.sub(r"\d+$", "", low_user)
-    if len(stem) >= 6 and stem in low_slug:
-        return True
-    # Common variants
-    if low_user.startswith("miss") and not low_user.startswith("missy"):
-        if low_user.replace("miss", "missy", 1) in low_slug:
-            return True
-    if low_user.startswith("missy"):
-        if low_user.replace("missy", "miss", 1) in low_slug:
-            return True
+    low_slug_raw = url_or_slug.lower()
+    low_user_raw = username.lower()
+
+    # Build all plausible slug forms of the username:
+    #   blondie_254, blondie-254, blondie254, blondie 254, blondie.254
+    user_bases = {low_user_raw}
+    for a, b in (("_", "-"), ("-", "_"), ("_", ""), ("-", ""),
+                 ("_", " "), ("-", " "), ("_", "."), ("-", ".")):
+        user_bases.add(low_user_raw.replace(a, b))
+
+    # Build normalized forms of the slug for each separator so e.g.
+    # "blondie-254" in a slug written as "blondie254" also matches.
+    slug_variants = {
+        low_slug_raw,
+        low_slug_raw.replace("_", "-"),
+        low_slug_raw.replace("-", "_"),
+        low_slug_raw.replace("-", ""),
+        low_slug_raw.replace("_", ""),
+    }
+    for u in user_bases:
+        for s in slug_variants:
+            if u in s:
+                return True
+
+    # miss* <-> missy* dialect flips are still safe (full-word still distinguishing)
+    if low_user_raw.startswith("miss") and not low_user_raw.startswith("missy"):
+        alt = low_user_raw.replace("miss", "missy", 1)
+        for s in slug_variants:
+            if alt in s:
+                return True
+    if low_user_raw.startswith("missy"):
+        alt = low_user_raw.replace("missy", "miss", 1)
+        for s in slug_variants:
+            if alt in s:
+                return True
+
+    # No generic stem fallback — rejecting is safer than downloading garbage.
     return False
 
 

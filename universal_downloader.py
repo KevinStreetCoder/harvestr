@@ -924,16 +924,22 @@ class UniversalDownloader:
             return []
 
         # Filter: only keep videos whose URL/slug plausibly matches the performer.
-        # This rejects "Macy K" / "Macy Cartel" / "Macy Meadows" when searching for Macy2000.
+        # This rejects "Macy K" / "Macy Cartel" / "Macy Meadows" when searching
+        # for Macy2000, and "Blondie.Lilllie" / "Kjbennet-blondie-fuck" etc.
+        # when searching for "blondie_254".
+        #
+        # Applied to ALL custom-scraper enumerations — even /tags/ hits, because
+        # when a tag URL doesn't actually exist on the site, many KVS mirrors
+        # serve a fallback search-result page that matches the substring only
+        # (e.g. /tags/blondie_254/ returning every video tagged "blondie").
         filtered = []
         rejected = 0
-        is_search_hit = "/search/" in (hit.url or "").lower()
         for cv in vids:
-            # Only apply filter to search-based hits (tag hits are already targeted)
-            if is_search_hit and not custom_scrapers.video_title_matches_user(
-                cv.video_url + " " + (cv.title or ""), performer,
-            ):
+            slug_text = cv.video_url + " " + (cv.title or "") + " " + (cv.uploader or "")
+            if not custom_scrapers.video_title_matches_user(slug_text, performer):
                 rejected += 1
+                self.log.debug(f"  [{scraper.NAME}] reject '{performer}' mismatch: "
+                               f"{(cv.title or cv.video_id)[:60]} @ {cv.video_url[:80]}")
                 continue
             filtered.append(cv)
         if rejected:

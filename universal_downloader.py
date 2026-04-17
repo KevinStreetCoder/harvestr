@@ -71,6 +71,9 @@ from custom_scrapers import (
     SiteScraper as _CustomSiteScraper,
 )
 
+# Shared live-progress tracker (writes downloads/_progress.json for the UI).
+from progress_tracker import ProgressTracker, make_yt_dlp_hook
+
 try:
     from rich.console import Console
     from rich.progress import (
@@ -220,6 +223,9 @@ class UniversalConfig:
     retries: int = 5
     probe_timeout: int = 30
     verbose: bool = False
+    # Site-specific credentials (login for camsmut etc.)
+    camsmut_username: str = ""
+    camsmut_password: str = ""
 
     @classmethod
     def load(cls, path: Path) -> "UniversalConfig":
@@ -625,9 +631,15 @@ class YtdlpEngine:
             opts["ffmpeg_location"] = str(Path(FFMPEG_PATH).parent)
         return opts
 
-    def download(self, video: VideoRef, output_dir: Path) -> Optional[dict]:
-        """Download one video. Returns info_dict on success, None on failure."""
+    def download(self, video: VideoRef, output_dir: Path,
+                 progress_hook=None) -> Optional[dict]:
+        """Download one video. Returns info_dict on success, None on failure.
+
+        Optional `progress_hook` is passed through to yt-dlp's `progress_hooks`
+        so the caller can surface byte/speed/ETA updates (UI progress bar)."""
         opts = self._download_opts(video.performer, output_dir)
+        if progress_hook is not None:
+            opts["progress_hooks"] = [progress_hook]
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(video.video_url, download=True)
@@ -664,11 +676,20 @@ class UniversalDownloader:
         self.history = DownloadHistory(self.output_dir / "history.json")
         self.failed = FailedHistory(self.output_dir / "failed.json")
         self.engine = YtdlpEngine(config, log)
+        # Live progress tracker — the web UI tails downloads/_progress.json
+        self.progress = ProgressTracker(self.output_dir)
         # Custom scrapers for cam-archive sites not supported by yt-dlp.
         # Pass cookies_file so sites requiring auth (Recu.me, camwhores.tv
         # private videos) can access protected content.
+        site_credentials = {}
+        if config.camsmut_username and config.camsmut_password:
+            site_credentials["camsmut"] = {
+                "username": config.camsmut_username,
+                "password": config.camsmut_password,
+            }
         self.custom_scrapers: List[_CustomSiteScraper] = _load_custom_scrapers(
             log, cookies_file=config.cookies_file,
+            site_credentials=site_credentials,
         )
 
     def check_disk_space(self) -> bool:
@@ -989,21 +1010,68 @@ class UniversalDownloader:
         # Limit length
         return name[:180] if len(name) > 180 else name
 
-    def _download_custom_mp4(self, v: VideoRef, out_path: Path) -> bool:
+    def _download_custom_mp4(self, v: VideoRef, out_path: Path,
+                             progress_slot: Optional[int] = None) -> bool:
         """Download a direct MP4 URL. Tries aria2c first, falls back to curl
         if aria2c fails (some CDNs don't play well with aria2c's TLS)."""
         ok = False
         if ARIA2C_PATH:
-            ok = self._download_via_aria2c(v, out_path)
+            ok = self._download_via_aria2c(v, out_path, progress_slot=progress_slot)
         if not ok:
             # aria2c failed OR not available — try curl
             if out_path.exists():
                 try: out_path.unlink()
                 except Exception: pass
-            ok = self._download_with_curl(v, out_path)
+            ok = self._download_with_curl(v, out_path, progress_slot=progress_slot)
         return ok
 
-    def _download_via_aria2c(self, v: VideoRef, out_path: Path) -> bool:
+    # Regex for aria2c's status summary line (emitted once per summary-interval):
+    #   [#abcd12 12MiB/100MiB(12%) CN:16 DL:2.5MiB ETA:30s]
+    _ARIA2C_LINE = re.compile(
+        r"\[#\S+\s+(?P<done>[\d.]+)(?P<done_unit>[KMGT]i?B)"
+        r"/(?P<total>[\d.]+)(?P<total_unit>[KMGT]i?B)"
+        r"\((?P<pct>[\d.]+)%\)"
+        r"(?:[^]]*DL:(?P<speed>[\d.]+)(?P<speed_unit>[KMGT]i?B))?"
+        r"(?:[^]]*ETA:(?P<eta>[\dhms]+))?",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _bytes_from(num_str: str, unit: str) -> int:
+        try:
+            n = float(num_str)
+        except ValueError:
+            return 0
+        u = unit.upper().rstrip("B").rstrip("I")
+        mult = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}.get(u, 1)
+        return int(n * mult)
+
+    @staticmethod
+    def _parse_eta(tok: str) -> int:
+        """aria2c prints ETA like '30s' / '2m30s' / '1h20m'."""
+        if not tok:
+            return 0
+        total = 0
+        cur = ""
+        for ch in tok.lower():
+            if ch.isdigit():
+                cur += ch
+            else:
+                try:
+                    v = int(cur)
+                except ValueError:
+                    v = 0
+                cur = ""
+                if ch == "h":   total += v * 3600
+                elif ch == "m": total += v * 60
+                elif ch == "s": total += v
+        if cur:
+            try: total += int(cur)
+            except ValueError: pass
+        return total
+
+    def _download_via_aria2c(self, v: VideoRef, out_path: Path,
+                             progress_slot: Optional[int] = None) -> bool:
         cmd = [
             ARIA2C_PATH,
             "-x", str(self.config.aria2c_connections),
@@ -1013,7 +1081,10 @@ class UniversalDownloader:
             "--connect-timeout=30", "--timeout=120",
             "--file-allocation=none",
             "--allow-overwrite=true", "--auto-file-renaming=false",
-            "--console-log-level=error", "--summary-interval=0",
+            "--console-log-level=error",
+            # Emit a summary line every second so we can parse progress.
+            # (Old value was 0 = disabled.)
+            "--summary-interval=1" if progress_slot is not None else "--summary-interval=0",
             "--check-certificate=false",
             f"--user-agent={v.stream_headers.get('User-Agent', custom_scrapers.USER_AGENT)}",
         ]
@@ -1026,15 +1097,47 @@ class UniversalDownloader:
             cmd += ["--header", f"{k}: {val}"]
         cmd += ["-d", str(out_path.parent), "-o", out_path.name, v.stream_url]
         try:
-            r = subprocess.run(cmd, capture_output=True, timeout=3600)
-            ok = r.returncode == 0 and out_path.exists() and out_path.stat().st_size > 100_000
-            if not ok:
+            if progress_slot is None:
+                r = subprocess.run(cmd, capture_output=True, timeout=3600)
+                rc = r.returncode
+            else:
+                # Streaming mode — read stdout line-by-line and push to UI.
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1,
+                )
+                deadline = time.time() + 3600
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    if time.time() > deadline:
+                        proc.kill()
+                        break
+                    m = self._ARIA2C_LINE.search(line)
+                    if m:
+                        done = self._bytes_from(m.group("done"), m.group("done_unit"))
+                        total = self._bytes_from(m.group("total"), m.group("total_unit"))
+                        speed = self._bytes_from(m.group("speed") or "0",
+                                                 m.group("speed_unit") or "B")
+                        eta = self._parse_eta(m.group("eta") or "")
+                        try: pct = float(m.group("pct"))
+                        except (TypeError, ValueError): pct = 0.0
+                        self.progress.update_video(progress_slot,
+                                                   bytes_done=done,
+                                                   bytes_total=total,
+                                                   percent=pct,
+                                                   speed_bps=speed,
+                                                   eta_seconds=eta)
+                rc = proc.wait()
+                r = None
+
+            ok = rc == 0 and out_path.exists() and out_path.stat().st_size > 100_000
+            if not ok and r is not None:
                 stderr = (r.stderr.decode(errors="replace") if r.stderr else "")
                 stdout = (r.stdout.decode(errors="replace") if r.stdout else "")
                 tail = (stderr or stdout)[-400:].replace("\n", " | ")
                 size = out_path.stat().st_size if out_path.exists() else 0
                 self.log.debug(
-                    f"aria2c exit={r.returncode} size={size} url={v.stream_url[:80]}... "
+                    f"aria2c exit={rc} size={size} url={v.stream_url[:80]}... "
                     f"msg={tail}"
                 )
             return ok
@@ -1045,7 +1148,8 @@ class UniversalDownloader:
             self.log.debug(f"aria2c error: {e}")
             return False
 
-    def _download_with_curl(self, v: VideoRef, out_path: Path) -> bool:
+    def _download_with_curl(self, v: VideoRef, out_path: Path,
+                            progress_slot: Optional[int] = None) -> bool:
         """Fallback MP4 download via curl. Single connection but more robust to
         CDN quirks that confuse aria2c (TLS fingerprinting, IPv6 issues, etc.)."""
         cmd = [
@@ -1062,6 +1166,30 @@ class UniversalDownloader:
                 continue
             cmd += ["-H", f"{k}: {val}"]
         cmd += ["-o", str(out_path), v.stream_url]
+
+        # If tracking progress, start a background thread to poll out_path's
+        # size while curl runs — curl's own --progress-bar is terse and hard to
+        # parse, and we already know the total size from the Content-Length.
+        stop_flag = [False]
+        if progress_slot is not None:
+            def _poll():
+                last_bytes = 0
+                last_time = time.time()
+                while not stop_flag[0]:
+                    time.sleep(0.5)
+                    try:
+                        size = out_path.stat().st_size if out_path.exists() else 0
+                    except OSError:
+                        size = 0
+                    now = time.time()
+                    dt = max(now - last_time, 0.001)
+                    speed = int((size - last_bytes) / dt) if size > last_bytes else 0
+                    last_bytes, last_time = size, now
+                    self.progress.update_video(progress_slot,
+                                               bytes_done=size,
+                                               speed_bps=speed)
+            threading.Thread(target=_poll, daemon=True).start()
+
         try:
             r = subprocess.run(cmd, capture_output=True, timeout=3600)
             ok = r.returncode == 0 and out_path.exists() and out_path.stat().st_size > 100_000
@@ -1072,6 +1200,8 @@ class UniversalDownloader:
         except Exception as e:
             self.log.debug(f"curl error: {e}")
             return False
+        finally:
+            stop_flag[0] = True
 
     def _download_custom_hls(self, v: VideoRef, out_path: Path) -> bool:
         """Download HLS m3u8 via ffmpeg."""
@@ -1145,11 +1275,23 @@ class UniversalDownloader:
         safe_title = self._sanitize_filename(v.title or v.video_id)
         out_path = perf_dir / f"{v.site}-{v.video_id}-{safe_title}.mp4"
 
-        # Download
-        if v.stream_kind == "hls":
-            ok = self._download_custom_hls(v, out_path)
-        else:
-            ok = self._download_custom_mp4(v, out_path)
+        # Download — wrap with progress tracking so the UI can show a live bar.
+        backend = "ffmpeg" if v.stream_kind == "hls" else ("aria2c" if ARIA2C_PATH else "curl")
+        slot = self.progress.start_video(
+            site=v.site, video_id=v.video_id,
+            title=v.title or v.video_id, backend=backend,
+        )
+        try:
+            if v.stream_kind == "hls":
+                ok = self._download_custom_hls(v, out_path)
+            else:
+                ok = self._download_custom_mp4(v, out_path, progress_slot=slot)
+        finally:
+            # Flash 100 % on success so the bar visually completes
+            if ok and out_path.exists():
+                fsz = out_path.stat().st_size
+                self.progress.update_video(slot, bytes_done=fsz, bytes_total=fsz, percent=100.0)
+            self.progress.finish_video(slot, status="ok" if ok else "fail")
 
         if not ok:
             self.failed.record_failure(v, f"{v.stream_kind or 'mp4'} download failed", 0)
@@ -1180,7 +1322,20 @@ class UniversalDownloader:
             # Custom-scraper videos use their own download path
             if v.is_custom:
                 return self._download_custom_video(v)
-            info = self.engine.download(v, self.output_dir)
+            slot = self.progress.start_video(
+                site=v.site, video_id=v.video_id,
+                title=v.title or v.video_id, backend="yt-dlp",
+            )
+            try:
+                info = self.engine.download(
+                    v, self.output_dir,
+                    progress_hook=make_yt_dlp_hook(self.progress, slot),
+                )
+            finally:
+                # Always clean up the active slot; finish counters happen below
+                # via session_increment
+                self.progress._active.pop(slot, None)
+                self.progress._flush()
             if not info:
                 self.failed.record_failure(v, "yt-dlp download failed", 0)
                 self.log.warning(f"  FAIL: {v.site}/{v.video_id}: {v.title[:60]}")
@@ -1246,9 +1401,11 @@ class UniversalDownloader:
                     continue
                 if r is None:
                     stats["skip"] += 1
+                    self.progress.session_increment("skip")
                     continue
                 status, rv, _ = r
                 stats[status] += 1
+                self.progress.session_increment(status)
                 if status == "ok":
                     site_success[site_key] = site_success.get(site_key, 0) + 1
         return stats
@@ -1256,6 +1413,9 @@ class UniversalDownloader:
     # ── High-level orchestration ─────────────────────────────────────────────
     def run_performer(self, performer: str, dry_run: bool = False) -> dict:
         summary = {"performer": performer, "hits": 0, "new_videos": 0, "downloaded": 0, "failed": 0}
+
+        # Surface to the UI: who's being processed right now
+        self.progress.session_start(performer, total_queued=0)
 
         if HAVE_RICH:
             console.rule(f"[bold cyan]{performer}[/bold cyan]")
@@ -1269,6 +1429,7 @@ class UniversalDownloader:
         summary["hits"] = total_hits
         if total_hits == 0:
             self.log.warning(f"No sites returned videos for '{performer}'")
+            self.progress.session_end()
             return summary
 
         self.log.info(f"Found {total_hits} site hits for '{performer}' "
@@ -1322,6 +1483,7 @@ class UniversalDownloader:
         all_new = deduped
 
         summary["new_videos"] = len(all_new)
+        self.progress.session_update(total_queued=len(all_new))
         if dry_run:
             self.log.info(f"[dry-run] would download {len(all_new)} videos")
             if HAVE_RICH and all_new:
@@ -1335,16 +1497,19 @@ class UniversalDownloader:
                 if len(all_new) > 30:
                     t.add_row("...", "", "", f"... +{len(all_new) - 30} more")
                 console.print(t)
+            self.progress.session_end()
             return summary
 
         if not all_new:
             self.log.info(f"Nothing new to download for '{performer}'")
+            self.progress.session_end()
             return summary
 
         stats = self.download_videos(all_new)
         summary["downloaded"] = stats["ok"]
         summary["failed"] = stats["fail"]
         self.log.info(f"'{performer}' done: {stats['ok']} OK, {stats['fail']} failed, {stats['skip']} skipped")
+        self.progress.session_end()
         return summary
 
     def run_all(self, dry_run: bool = False) -> None:

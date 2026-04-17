@@ -2156,6 +2156,257 @@ class Recume(SiteScraper):
         return True
 
 
+# ── CamSmut.com (VOE.sx video host + optional login) ─────────────────────────
+
+import base64 as _base64
+
+
+class CamSmut(SiteScraper):
+    """camsmut.com — free-to-view cam archive site that hosts videos on
+    VOE.sx. Video pages return 404 without a logged-in session cookie, so
+    the first run performs an automatic login if username/password are
+    supplied via class attributes (`USERNAME` / `PASSWORD`), env vars
+    `CAMSMUT_USERNAME` / `CAMSMUT_PASSWORD`, or a project-level
+    `camsmut_credentials.json`. Once logged in, the session cookie is
+    cached and re-used.
+
+    The page embeds VOE.sx via an iframe whose `data-src` attribute is the
+    VOE URL reversed and base64-encoded. After decoding, we hand the VOE
+    URL off to yt-dlp's built-in VoeIE extractor, which returns the m3u8
+    stream URL.
+    """
+
+    NAME = "camsmut"
+    BASE_URL = "https://camsmut.com"
+    CATEGORY = "cam"
+    MIN_ENTRIES = 1
+    COOKIE_DOMAIN = "camsmut.com"
+
+    # Optional credentials — set by the CLI / webui after reading config.
+    USERNAME: str = ""
+    PASSWORD: str = ""
+
+    VIDEO_LINK_RE = re.compile(r'href="(/video/([a-z0-9]+)/([^"]+))"', re.IGNORECASE)
+    PLAYER_DATA_SRC_RE = re.compile(
+        r'id="player"[^>]*data-src="([^"]+)"', re.IGNORECASE)
+    CSRF_RE = re.compile(
+        r'<input[^>]+type="hidden"[^>]+value="([A-Za-z0-9]{16,})"', re.IGNORECASE)
+
+    def _make_session(self) -> requests.Session:
+        s = super()._make_session()
+        # Skip age gate; harmless cookie.
+        s.cookies.set("access", "1", domain="camsmut.com", path="/")
+        self._logged_in = False
+        return s
+
+    def _credentials(self) -> tuple[str, str]:
+        """Resolve camsmut credentials from (in order): class attrs,
+        CAMSMUT_* env vars, camsmut_credentials.json in script dir."""
+        u, p = self.USERNAME, self.PASSWORD
+        if not u or not p:
+            u = u or os.environ.get("CAMSMUT_USERNAME", "")
+            p = p or os.environ.get("CAMSMUT_PASSWORD", "")
+        if not u or not p:
+            try:
+                creds_file = Path(__file__).with_name("camsmut_credentials.json")
+                if creds_file.exists():
+                    data = json.loads(creds_file.read_text(encoding="utf-8"))
+                    u = u or data.get("username", "")
+                    p = p or data.get("password", "")
+            except Exception:
+                pass
+        return u, p
+
+    def _login(self) -> bool:
+        if self._logged_in:
+            return True
+        u, p = self._credentials()
+        if not u or not p:
+            self.log.debug(f"  [{self.NAME}] no credentials — skipping login")
+            return False
+        try:
+            r = self.session.get(f"{self.BASE_URL}/login", timeout=15)
+            if r.status_code != 200:
+                return False
+            csrf = ""
+            m = self.CSRF_RE.search(r.text)
+            if m:
+                csrf = m.group(1)
+            # Find the actual field names
+            csrf_field = "csrf"
+            for mm in re.finditer(r'<input[^>]+name="([^"]+)"[^>]+type="hidden"', r.text):
+                csrf_field = mm.group(1)
+            payload = {"username": u, "password": p, "remember": "on"}
+            if csrf:
+                payload[csrf_field] = csrf
+            r2 = self.session.post(
+                f"{self.BASE_URL}/login",
+                data=payload, timeout=15, allow_redirects=True,
+                headers={"Referer": f"{self.BASE_URL}/login"},
+            )
+            # Heuristic: if the login page is NOT in the final URL, we
+            # probably succeeded. Verify by hitting any known-good page.
+            self._logged_in = "/login" not in r2.url or r2.status_code == 200
+            if self._logged_in:
+                self.log.debug(f"  [{self.NAME}] login OK for {u}")
+            else:
+                self.log.warning(f"  [{self.NAME}] login failed for {u}")
+            return self._logged_in
+        except Exception as e:
+            self.log.debug(f"  [{self.NAME}] login exception: {e}")
+            return False
+
+    def _has_session_cookie(self) -> bool:
+        """Check if we already have a valid session cookie (from cookies.txt)."""
+        for c in self.session.cookies:
+            if "camsmut.com" in (c.domain or "") and "session" in c.name.lower():
+                return True
+        return False
+
+    def _ensure_auth(self) -> None:
+        """Login via credentials if cookies don't already provide a session."""
+        if self._has_session_cookie():
+            return
+        self._login()
+
+    @staticmethod
+    def _decode_data_src(encoded: str) -> str:
+        """atob(encoded.split('').reverse().join('')) — camsmut's VOE obfuscation."""
+        try:
+            return _base64.b64decode(encoded[::-1]).decode("utf-8")
+        except Exception:
+            return ""
+
+    def probe(self, username: str) -> Optional[ProbeHit]:
+        self._ensure_auth()
+        try:
+            r = self.session.get(
+                f"{self.BASE_URL}/search",
+                params={"q": username}, timeout=20,
+            )
+        except Exception as e:
+            self.log.debug(f"  [{self.NAME}] probe: {e}")
+            return None
+        if r.status_code != 200:
+            return None
+        matches = self.VIDEO_LINK_RE.findall(r.text)
+        if not matches:
+            return None
+        # Filter to links whose slug contains the username (reduces false positives
+        # on cross-performer "similar videos" sections)
+        u_lower = username.lower()
+        filtered = [m for m in matches if u_lower in m[2].lower()]
+        if not filtered:
+            # Fall back to all matches if filter is too aggressive
+            filtered = matches
+        unique = {vhash for _, vhash, _ in filtered}
+        if len(unique) < self.MIN_ENTRIES:
+            return None
+        return ProbeHit(
+            site=self.NAME,
+            url=f"{self.BASE_URL}/search?q={username}",
+            entry_count=len(unique),
+        )
+
+    def enumerate(self, hit: ProbeHit, username: str, limit: int) -> List[VideoRef]:
+        self._ensure_auth()
+        videos: List[VideoRef] = []
+        seen: set = set()
+        u_lower = username.lower()
+        for page in range(1, 50):
+            url = hit.url if page == 1 else f"{hit.url}&page={page}"
+            try:
+                r = self.session.get(url, timeout=20)
+            except Exception:
+                break
+            if r.status_code != 200:
+                break
+            matches = self.VIDEO_LINK_RE.findall(r.text)
+            new_this_page = 0
+            for path, vhash, slug in matches:
+                if vhash in seen:
+                    continue
+                if u_lower not in slug.lower() and u_lower not in path.lower():
+                    continue
+                seen.add(vhash)
+                new_this_page += 1
+                videos.append(VideoRef(
+                    site=self.NAME,
+                    video_id=vhash,
+                    video_url=f"{self.BASE_URL}{path}",
+                    title=slug.replace("-", " "),
+                    performer=username,
+                ))
+                if limit and len(videos) >= limit:
+                    return videos
+            if new_this_page == 0:
+                break
+            time.sleep(0.5)
+        return videos
+
+    def extract_stream(self, video: VideoRef) -> bool:
+        """Resolve the VOE.sx stream URL for a single video.
+
+        Flow: GET the camsmut video page -> decode the iframe's data-src ->
+        yields the VOE embed URL. We then delegate to yt-dlp's built-in
+        VoeIE extractor to resolve the m3u8 stream URL.
+        """
+        self._ensure_auth()
+        try:
+            r = self.session.get(video.video_url, timeout=20)
+        except Exception as e:
+            self.log.debug(f"  [{self.NAME}] page fetch: {e}")
+            return False
+        if r.status_code == 404:
+            video.stream_kind = "private"
+            return False
+        if r.status_code != 200:
+            return False
+        m = self.PLAYER_DATA_SRC_RE.search(r.text)
+        if not m:
+            return False
+        voe_url = self._decode_data_src(m.group(1))
+        if not voe_url or "http" not in voe_url:
+            return False
+
+        # Delegate to yt-dlp's VoeIE for m3u8 resolution.
+        try:
+            import yt_dlp
+            with yt_dlp.YoutubeDL({
+                "quiet": True, "no_warnings": True,
+                "skip_download": True,
+                "extract_flat": False,
+            }) as ydl:
+                info = ydl.extract_info(voe_url, download=False)
+                if not info:
+                    return False
+                # Pick the best format
+                fmts = info.get("formats") or []
+                hls = [f for f in fmts if (f.get("protocol") or "").startswith("m3u8")]
+                mp4 = [f for f in fmts if f.get("ext") == "mp4" and f.get("url")]
+                chosen = None
+                if hls:
+                    chosen = max(hls, key=lambda f: f.get("tbr") or f.get("height") or 0)
+                elif mp4:
+                    chosen = max(mp4, key=lambda f: f.get("tbr") or f.get("height") or 0)
+                elif info.get("url"):
+                    chosen = {"url": info["url"], "protocol": "https"}
+                if not chosen or not chosen.get("url"):
+                    return False
+                video.stream_url = chosen["url"]
+                video.stream_kind = "hls" if "m3u8" in (chosen.get("protocol") or "") or ".m3u8" in chosen["url"] else "mp4"
+                hdrs = {"User-Agent": USER_AGENT, "Referer": voe_url}
+                http_hdrs = chosen.get("http_headers") or {}
+                hdrs.update(http_hdrs)
+                video.stream_headers = hdrs
+                if info.get("title") and not video.title:
+                    video.title = info["title"]
+                return True
+        except Exception as e:
+            self.log.debug(f"  [{self.NAME}] yt-dlp VOE resolve: {e}")
+            return False
+
+
 # ── Registry ──────────────────────────────────────────────────────────────
 
 ALL_SCRAPER_CLASSES = [
@@ -2177,14 +2428,30 @@ ALL_SCRAPER_CLASSES = [
     RedGifs, RedditUser,
     # Auth-required (only activates if cookies_file is set with valid cookies)
     XCom, Recume,
+    # Login-required (username/password — auto-login on first probe)
+    CamSmut,
 ]
 
 
 def load_scrapers(log: logging.Logger, enabled_names: Optional[List[str]] = None,
-                   cookies_file: str = "") -> List[SiteScraper]:
+                   cookies_file: str = "",
+                   site_credentials: Optional[Dict[str, Dict[str, str]]] = None,
+                   ) -> List[SiteScraper]:
     """Instantiate all custom scrapers.
+
     cookies_file: optional Netscape cookies.txt path. Each scraper filters
-    cookies by its COOKIE_DOMAIN when present."""
+    cookies by its COOKIE_DOMAIN when present.
+
+    site_credentials: optional dict mapping site name -> {"username": ..., "password": ...}
+    for scrapers that support username/password login (e.g. camsmut).
+    """
+    # Apply credentials to class attributes BEFORE instantiation so __init__
+    # can pick them up if needed.
+    if site_credentials:
+        if "camsmut" in site_credentials:
+            CamSmut.USERNAME = site_credentials["camsmut"].get("username", "")
+            CamSmut.PASSWORD = site_credentials["camsmut"].get("password", "")
+
     out: List[SiteScraper] = []
     for cls in ALL_SCRAPER_CLASSES:
         if enabled_names and cls.NAME not in enabled_names:

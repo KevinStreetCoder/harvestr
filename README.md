@@ -406,6 +406,50 @@ times out.
 
 ---
 
+## Troubleshooting
+
+### "I'm only getting hits from Coomer, and they all fail"
+
+This is the most common "nothing happens" scenario and it usually means
+**two things combined**:
+
+1. Your chosen performer has a narrow web footprint — Coomer is the
+   only place with their content. Not every archived creator exists on
+   every mirror. Harvestr logs `No hits for '<name>' on: leakedzone,
+   fapello, kemono, …` at the end of the probe phase so you can see
+   exactly which scrapers reported zero content.
+
+2. Your network can't reach Coomer's sharded CDN (`n1-n4.coomer.st`,
+   subnet `91.149.227.0/24`). We documented in April 2026 that this
+   subnet was null-routed globally for a stretch; even when it's back,
+   many ISPs IP-block the range regardless.
+
+**Fix options (in order of least effort):**
+- **Set a download proxy** in the UI's Settings card: `socks5://127.0.0.1:9055`
+  (built-in Tor — click "Use Tor" button, ~60s to bootstrap)
+- **Connect a VPN** (Mullvad: Switzerland/Netherlands/Sweden exits work
+  best; US exits often apply SNI filtering that blocks Coomer entirely)
+- **Try a different network** — mobile hotspot often routes differently
+  than a fixed-line ISP
+
+The scraper is correct; only the route to the bytes is broken.
+
+### "Progress tab shows nothing"
+
+Make sure you haven't just completed a run — the progress card is only
+shown while a session is active. If you're on the Archive tab and don't
+see progress, check the Live tab badge (top-right of the nav) to see if
+something's running over there.
+
+### "The Live tab banner says 'Live recording failed to start'"
+
+The vendored StreaMonitor under `live_backend/streamonitor/` failed to
+import. Most likely causes:
+- You deleted `live_backend/` (restore from git)
+- You set `HARVESTR_STREAMONITOR` to an invalid path (unset it or point
+  at a real StreaMonitor checkout)
+- A Python version mismatch (StreaMonitor targets 3.10+; upgrade if on 3.8-3.9)
+
 ## Research & reference
 
 - **[research/coomer_alternatives_2026.md](research/coomer_alternatives_2026.md)** —

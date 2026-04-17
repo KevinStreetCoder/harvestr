@@ -578,18 +578,62 @@ INDEX_HTML = r"""
   .auth-site details summary { cursor: pointer; color: var(--accent);
                                 font-size: 12px; padding: 3px 0; }
 
-  /* Toast */
-  .toast {
-    position: fixed; top: 74px; right: 24px;
-    padding: 12px 16px; background: linear-gradient(180deg, #2f8ae0, #2a6cb3);
-    color: white; border-radius: 8px; font-size: 13px; font-weight: 500;
-    opacity: 0; transform: translateY(-8px); transition: all .3s;
-    box-shadow: 0 6px 20px #00000080; z-index: 200;
-    border: 1px solid #3b8ce6;
+  /* Toasts — stacking container */
+  #toast-stack {
+    position: fixed; top: 74px; right: 24px; z-index: 200;
+    display: flex; flex-direction: column; gap: 8px; max-width: min(420px, 90vw);
+    pointer-events: none;
   }
-  .toast.show { opacity: 1; transform: translateY(0); }
-  .toast.error { background: linear-gradient(180deg, #e85656, #a8381b); border-color: #e85656; }
-  .toast.success { background: linear-gradient(180deg, #34c26e, #1b7d3b); border-color: #34c26e; }
+  #toast-stack .toast-item {
+    padding: 12px 16px;
+    background: linear-gradient(180deg, #2f8ae0, #2a6cb3);
+    color: white; border-radius: 8px; font-size: 13px; font-weight: 500;
+    box-shadow: 0 6px 20px #00000080;
+    border: 1px solid #3b8ce6;
+    animation: toast-in .28s cubic-bezier(.2,.9,.3,1.4);
+    pointer-events: auto;
+    display: flex; align-items: center; gap: 10px;
+  }
+  #toast-stack .toast-item.hide { animation: toast-out .25s forwards; }
+  #toast-stack .toast-item.error { background: linear-gradient(180deg, #e85656, #a8381b); border-color: #e85656; }
+  #toast-stack .toast-item.success { background: linear-gradient(180deg, #34c26e, #1b7d3b); border-color: #34c26e; }
+  #toast-stack .toast-item.info { background: linear-gradient(180deg, #5a5e7e, #323546); border-color: #525879; }
+  #toast-stack .toast-item .icon-small { flex-shrink: 0; width: 15px; height: 15px; opacity: .9; }
+  @keyframes toast-in {
+    0%   { opacity: 0; transform: translateY(-14px) scale(.92); }
+    100% { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  @keyframes toast-out {
+    0%   { opacity: 1; transform: translateX(0); }
+    100% { opacity: 0; transform: translateX(40px); }
+  }
+  /* Back-compat (old .toast if still referenced) */
+  .toast { display: none; }
+
+  /* Modal backdrop blur */
+  .modal-backdrop { backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
+  .modal-backdrop.show { animation: modal-in .2s ease-out; }
+  @keyframes modal-in { from { opacity: 0; } to { opacity: 1; } }
+  .modal-card { animation: card-in .24s cubic-bezier(.2,.9,.3,1.2); }
+  @keyframes card-in { from { opacity: 0; transform: translateY(-10px) scale(.97); }
+                         to { opacity: 1; transform: translateY(0) scale(1); } }
+
+  /* Scrollbar polish (Webkit) */
+  *::-webkit-scrollbar { width: 10px; height: 10px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  *::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 5px;
+                                border: 2px solid transparent; background-clip: padding-box; }
+  *::-webkit-scrollbar-thumb:hover { background: #4d5570;
+                                      border: 2px solid transparent; background-clip: padding-box; }
+
+  /* Skeleton loaders */
+  .skel {
+    background: linear-gradient(90deg, var(--bg-3) 25%, #252a38 50%, var(--bg-3) 75%);
+    background-size: 200% 100%;
+    animation: skel 1.4s ease-in-out infinite;
+    border-radius: 4px;
+  }
+  @keyframes skel { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
   .muted { color: var(--text-3); font-size: 11.5px; }
   .clickable { cursor: pointer; }
@@ -858,7 +902,7 @@ INDEX_HTML = r"""
   </div>
 </header>
 
-<div id="toast" class="toast"></div>
+<div id="toast-stack" role="status" aria-live="polite" aria-atomic="false"></div>
 
 <div class="modal-backdrop" id="preview-modal" onclick="closePreview(event)">
   <div class="modal-card" onclick="event.stopPropagation()">
@@ -1195,10 +1239,23 @@ let _selectedPerformer = null;
 let _siteCat = 'all';
 
 // ── Helpers ──────────────────────────────────────────────────────────────
-function toast(msg, type='') {
-  const t = document.getElementById('toast');
-  t.textContent = msg; t.className = 'toast show ' + type;
-  setTimeout(() => t.className = 'toast ' + type, 3000);
+function toast(msg, type = '') {
+  const stack = document.getElementById('toast-stack');
+  const item = document.createElement('div');
+  item.className = 'toast-item ' + (type || 'info');
+  const icons = {
+    success: '<svg class="icon-small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
+    error:   '<svg class="icon-small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>',
+    info:    '<svg class="icon-small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>',
+  };
+  item.innerHTML = (icons[type] || icons.info) + '<span>' + escapeHtml(msg) + '</span>';
+  stack.appendChild(item);
+  // Keep a rolling max of 5 toasts
+  while (stack.children.length > 5) stack.removeChild(stack.firstChild);
+  setTimeout(() => {
+    item.classList.add('hide');
+    setTimeout(() => item.remove(), 300);
+  }, 3500);
 }
 function escapeHtml(s) {
   return (s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));

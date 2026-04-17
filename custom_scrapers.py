@@ -2254,6 +2254,13 @@ class CamSmut(SiteScraper):
     CSRF_RE = re.compile(
         r'<input[^>]+type="hidden"[^>]+value="([A-Za-z0-9]{16,})"', re.IGNORECASE)
 
+    # When the session isn't authenticated, every video page returns 404.
+    # After this many consecutive 404s on extract_stream, abort remaining
+    # extractions for the session (saves 200+ HTTP calls on dead searches).
+    MAX_CONSECUTIVE_404S = 3
+    _consecutive_404s: int = 0
+    _extract_circuit_broken: bool = False
+
     def _make_session(self) -> requests.Session:
         s = super()._make_session()
         # Skip age gate; harmless cookie.
@@ -2413,6 +2420,11 @@ class CamSmut(SiteScraper):
         yields the VOE embed URL. We then delegate to yt-dlp's built-in
         VoeIE extractor to resolve the m3u8 stream URL.
         """
+        # Circuit-breaker: if we've seen N consecutive 404s, the search is
+        # returning stale results or we're unauthenticated — stop trying.
+        if self._extract_circuit_broken:
+            video.stream_kind = "private"
+            return False
         self._ensure_auth()
         try:
             r = self.session.get(video.video_url, timeout=20)
@@ -2421,7 +2433,17 @@ class CamSmut(SiteScraper):
             return False
         if r.status_code == 404:
             video.stream_kind = "private"
+            self._consecutive_404s += 1
+            if self._consecutive_404s >= self.MAX_CONSECUTIVE_404S:
+                self._extract_circuit_broken = True
+                self.log.info(
+                    f"  [{self.NAME}] giving up: {self._consecutive_404s} "
+                    f"consecutive 404s (search results are stale / need login). "
+                    f"Remaining refs will be marked private without probing."
+                )
             return False
+        # Reset counter on any non-404 response
+        self._consecutive_404s = 0
         if r.status_code != 200:
             return False
         m = self.PLAYER_DATA_SRC_RE.search(r.text)

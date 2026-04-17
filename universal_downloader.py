@@ -1510,6 +1510,21 @@ class UniversalDownloader:
 
         self.log.info(f"Found {total_hits} site hits for '{performer}' "
                      f"({len(yt_hits)} yt-dlp + {len(custom_hits)} custom):")
+
+        # Visibility: also log which scrapers were probed but came back empty.
+        # Helps users distinguish "the scraper broke" from "this performer
+        # genuinely isn't on that site". Only log the authoritative
+        # custom scrapers — yt-dlp sites return 1-entry placeholders very
+        # often, which would spam the log.
+        hit_site_names = {h.site for h in yt_hits} | {ch[1].site for ch in custom_hits}
+        empty_auth = []
+        for scraper in self.custom_scrapers:
+            if scraper.NAME in hit_site_names:
+                continue
+            if getattr(scraper, "AUTHORITATIVE_USER", False):
+                empty_auth.append(scraper.NAME)
+        if empty_auth:
+            self.log.info(f"  No hits for '{performer}' on: {', '.join(sorted(empty_auth))}")
         if HAVE_RICH:
             t = Table(title=f"Sites with videos for {performer}", show_lines=False)
             t.add_column("Site", style="cyan")

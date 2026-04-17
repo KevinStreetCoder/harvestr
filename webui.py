@@ -426,6 +426,22 @@ INDEX_HTML = r"""
   .flex { display: flex; gap: 10px; align-items: center; }
   .mb { margin-bottom: 12px; }
 
+  /* Add-row: one line, flex-wrap on narrow screens, input grows */
+  .add-row {
+    display: flex; gap: 8px; align-items: stretch;
+    flex-wrap: wrap; margin-bottom: 12px;
+  }
+  .add-row > input[type="text"],
+  .add-row > select { flex: 1 1 200px; min-width: 0; }
+  .add-row > button { flex: 0 0 auto; white-space: nowrap; }
+  /* Primary buttons are wider so they feel distinct */
+  .add-row > button.primary { min-width: 86px; justify-content: center; }
+  .add-row > button.ghost   { min-width: 72px; justify-content: center; }
+  .add-row svg { flex-shrink: 0; }
+  @media (max-width: 540px) {
+    .add-row > input, .add-row > select, .add-row > button { flex: 1 1 100%; }
+  }
+
   .perf-row {
     display: flex; align-items: center; gap: 10px; padding: 9px 12px;
     border: 1px solid transparent; border-radius: 7px;
@@ -973,14 +989,17 @@ INDEX_HTML = r"""
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
         Performers
       </h2>
-      <div class="flex mb">
-        <input id="new-perf" type="text" placeholder="username (e.g. blondie_254)"
+      <div class="add-row">
+        <input id="new-perf" type="text" placeholder="Add performer (e.g. blondie_254)"
                aria-label="Performer username"
                onkeydown="if(event.key==='Enter'){addPerformer();}" />
-        <button class="primary" onclick="addPerformer()">+ Add</button>
+        <button class="primary" onclick="addPerformer()" data-tip="Add one performer">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+          Add
+        </button>
         <button class="ghost" onclick="openBulkAdd()" data-tip="Paste a list or import a JSON config"
                 aria-label="Bulk add / Import">
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M12 18v-6M9 15h6"/></svg>
           Bulk
         </button>
       </div>
@@ -1202,21 +1221,23 @@ INDEX_HTML = r"""
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
         Track a model
       </h2>
-      <div class="flex" style="flex-wrap: wrap; gap: 10px;">
+      <div class="add-row">
         <input id="live-new-username" type="text" placeholder="Model username"
-               style="flex: 1; min-width: 200px;"
                aria-label="Model username to add"
                onkeydown="if(event.key==='Enter'){liveAdd()}"/>
-        <select id="live-new-site" aria-label="Cam site" style="flex: 0 0 200px;">
-          <option value="">— Choose site —</option>
+        <select id="live-new-site" aria-label="Cam site">
+          <option value="">— Site —</option>
         </select>
-        <input id="live-new-roomid" type="text" placeholder="Room ID (if required)"
-               style="flex: 0 0 180px; display: none;"
+        <input id="live-new-roomid" type="text" placeholder="Room ID"
+               style="flex: 0 0 140px; display: none;"
                aria-label="Room ID"/>
-        <button class="primary" onclick="liveAdd()">+ Track</button>
+        <button class="primary" onclick="liveAdd()" data-tip="Start tracking this model">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+          Track
+        </button>
         <button class="ghost" onclick="openLiveBulkAdd()" data-tip="Paste list or import JSON"
                 aria-label="Bulk add live models">
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M12 18v-6M9 15h6"/></svg>
           Bulk
         </button>
       </div>

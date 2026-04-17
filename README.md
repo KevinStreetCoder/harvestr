@@ -471,6 +471,22 @@ shown while a session is active. If you're on the Archive tab and don't
 see progress, check the Live tab badge (top-right of the nav) to see if
 something's running over there.
 
+### "CamSmut says NEEDS-BROWSER for every video"
+
+CamSmut has two layers of anti-scraping:
+
+1. **Hash obfuscation** in URLs — solved (we reverse the `pointerover`
+   JS transform automatically).
+2. **Cloudflare + JS-rendered player** on the embed host (playmogo.com,
+   doodstream, etc.) — NOT solved with pure HTTP. The embed returns 403
+   Cloudflare challenge unless rendered in a real browser.
+
+**Workaround:** use the standalone Playwright-based camsmut downloader at
+`C:\Users\<you>\Documents\Scripts\Downloaders\camsmut\camsmut_downloader.py`
+for actual downloads. Harvestr's built-in CamSmut scraper correctly probes
+and enumerates but marks individual videos `NEEDS-BROWSER` (skipped, not
+failed) so they don't pollute `failed.json`.
+
 ### "The Live tab banner says 'Live recording failed to start'"
 
 The vendored StreaMonitor under `live_backend/streamonitor/` failed to

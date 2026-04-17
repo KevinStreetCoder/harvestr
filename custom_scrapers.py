@@ -2225,17 +2225,21 @@ import base64 as _base64
 
 class CamSmut(SiteScraper):
     """camsmut.com — free-to-view cam archive site that hosts videos on
-    VOE.sx. Video pages return 404 without a logged-in session cookie, so
-    the first run performs an automatic login if username/password are
-    supplied via class attributes (`USERNAME` / `PASSWORD`), env vars
-    `CAMSMUT_USERNAME` / `CAMSMUT_PASSWORD`, or a project-level
-    `camsmut_credentials.json`. Once logged in, the session cookie is
-    cached and re-used.
+    VOE.sx. No login required.
 
-    The page embeds VOE.sx via an iframe whose `data-src` attribute is the
-    VOE URL reversed and base64-encoded. After decoding, we hand the VOE
-    URL off to yt-dlp's built-in VoeIE extractor, which returns the m3u8
-    stream URL.
+    camsmut.com uses client-side URL obfuscation: video hashes in the HTML
+    have one extra character that is stripped by a JS `pointerover` event
+    before navigation. Without that transform every video page 404s — hence
+    the `_deobfuscate_path` helper. Credentials are still plumbed through
+    for rare cases where the user wants to log in (e.g. to vote or favorite),
+    but they are NOT required for downloads.
+
+    Pipeline:
+      search/listing page → _deobfuscate_path on each href
+      → fetch cleaned /video/<hash>/<slug>
+      → parse iframe data-src (reversed base64)
+      → decode → VOE.sx embed URL
+      → hand to yt-dlp's built-in VoeIE extractor → m3u8 → ffmpeg
     """
 
     NAME = "camsmut"
@@ -2340,11 +2344,20 @@ class CamSmut(SiteScraper):
 
     @staticmethod
     def _decode_data_src(encoded: str) -> str:
-        """atob(encoded.split('').reverse().join('')) — camsmut's VOE obfuscation."""
-        try:
-            return _base64.b64decode(encoded[::-1]).decode("utf-8")
-        except Exception:
-            return ""
+        """atob(encoded.split('').reverse().join('')) — camsmut's embed obfuscation.
+
+        The reversed base64 string may be missing '=' padding (JS atob is
+        lenient; Python's b64decode isn't). Try all padding lengths.
+        """
+        reversed_enc = encoded[::-1]
+        for extra in range(4):
+            try:
+                decoded = _base64.b64decode(reversed_enc + "=" * extra).decode("utf-8")
+                if decoded.startswith("http"):
+                    return decoded
+            except Exception:
+                continue
+        return ""
 
     def probe(self, username: str) -> Optional[ProbeHit]:
         self._ensure_auth()
@@ -2377,6 +2390,38 @@ class CamSmut(SiteScraper):
             entry_count=len(unique),
         )
 
+    @staticmethod
+    def _deobfuscate_path(href: str) -> tuple[str, str]:
+        """Undo camsmut's client-side URL obfuscation.
+
+        CamSmut injects an extra character into video-hash URLs in the HTML,
+        and the site's `pointerover` JS event strips it back out before
+        navigation. Scripts without a real browser see 404 unless they
+        apply the same transform.
+
+        JS (from the site):
+            let h=e.getAttribute("href");
+            if (!h.startsWith("/")) return;
+            var x=h.substring(7).indexOf("/");
+            e.setAttribute("href", h.substring(0, 6+x) + h.substring(7+x));
+
+        i.e. drop exactly ONE character at position (6 + position-of-first-'/'
+        in the slice starting at 7). For a URL like /video/mg55po24/slug,
+        this removes the LAST char of the 8-char hash → /video/mg55po2/slug.
+
+        Returns (clean_href, clean_hash).
+        """
+        if not href.startswith("/"):
+            return href, ""
+        suffix = href[7:]
+        x = suffix.find("/")
+        if x < 0:
+            return href, ""
+        clean = href[:6 + x] + href[7 + x:]
+        # Extract hash from /video/<hash>/<slug>
+        m = re.match(r"^/video/([a-z0-9]+)/", clean, re.IGNORECASE)
+        return clean, (m.group(1) if m else "")
+
     def enumerate(self, hit: ProbeHit, username: str, limit: int) -> List[VideoRef]:
         self._ensure_auth()
         videos: List[VideoRef] = []
@@ -2392,17 +2437,22 @@ class CamSmut(SiteScraper):
                 break
             matches = self.VIDEO_LINK_RE.findall(r.text)
             new_this_page = 0
-            for path, vhash, slug in matches:
-                if vhash in seen:
+            for path, raw_hash, slug in matches:
+                # Apply the client-side URL deobfuscation JS does on hover.
+                # Without this, every video page returns 404.
+                clean_path, clean_hash = self._deobfuscate_path(path)
+                if not clean_hash:
                     continue
-                if u_lower not in slug.lower() and u_lower not in path.lower():
+                if clean_hash in seen:
                     continue
-                seen.add(vhash)
+                if u_lower not in slug.lower() and u_lower not in clean_path.lower():
+                    continue
+                seen.add(clean_hash)
                 new_this_page += 1
                 videos.append(VideoRef(
                     site=self.NAME,
-                    video_id=vhash,
-                    video_url=f"{self.BASE_URL}{path}",
+                    video_id=clean_hash,
+                    video_url=f"{self.BASE_URL}{clean_path}",
                     title=slug.replace("-", " "),
                     performer=username,
                 ))
@@ -2453,15 +2503,44 @@ class CamSmut(SiteScraper):
         if not voe_url or "http" not in voe_url:
             return False
 
-        # Delegate to yt-dlp's VoeIE for m3u8 resolution.
+        # Delegate to yt-dlp for m3u8 resolution. camsmut has rotated through
+        # multiple embed hosts (VOE.sx, playmogo.com, doodstream, etc.);
+        # yt-dlp covers most. If yt-dlp rejects it as "unsupported URL",
+        # we mark the ref `needs_browser` so the user knows to run their
+        # Playwright-based downloader for this one.
         try:
             import yt_dlp
             with yt_dlp.YoutubeDL({
                 "quiet": True, "no_warnings": True,
                 "skip_download": True,
                 "extract_flat": False,
+                # Some embed hosts require browser TLS fingerprint; yt-dlp
+                # can use curl_cffi if we ask nicely.
+                "extractor_args": {"generic": {"impersonate": ["chrome131"]}},
             }) as ydl:
-                info = ydl.extract_info(voe_url, download=False)
+                try:
+                    info = ydl.extract_info(voe_url, download=False)
+                except yt_dlp.utils.DownloadError as e:
+                    msg = str(e).lower()
+                    browser_needed_markers = (
+                        "unsupported url",
+                        "no video formats",
+                        "cloudflare",
+                        "403",
+                        "anti-bot challenge",
+                    )
+                    if any(mk in msg for mk in browser_needed_markers):
+                        self.log.debug(
+                            f"  [{self.NAME}] {video.video_id}: embed host "
+                            f"{voe_url.split('/')[2]} needs a real browser "
+                            f"(JS / Cloudflare challenge); yt-dlp can't extract. "
+                            f"Use the standalone Playwright downloader at "
+                            f"C:/Users/<you>/Documents/Scripts/Downloaders/camsmut/"
+                        )
+                        video.stream_kind = "needs_browser"
+                    else:
+                        self.log.debug(f"  [{self.NAME}] yt-dlp error: {e}")
+                    return False
                 if not info:
                     return False
                 # Pick the best format

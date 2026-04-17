@@ -1336,6 +1336,14 @@ class UniversalDownloader:
                     self.log.info(f"  CDN-BLOCKED: {v.site}/{v.video_id} "
                                   f"(shard CDN unreachable — try a different VPN or wait)")
                     return ("skip", v, None)
+                if cv.stream_kind == "needs_browser":
+                    # Embed host (e.g. playmogo.com, doodstream) requires a
+                    # real browser to extract the m3u8. Mark skip so we
+                    # don't count as permanent failure — user can run a
+                    # Playwright-based tool for these.
+                    self.log.info(f"  NEEDS-BROWSER: {v.site}/{v.video_id} "
+                                  f"(embed host requires JS execution)")
+                    return ("skip", v, None)
                 self.failed.record_failure(v, "stream extraction failed", 0)
                 self.log.warning(f"  FAIL extract: {v.site}/{v.video_id}: {v.title[:60]}")
                 return ("fail", v, None)

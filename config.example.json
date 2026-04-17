@@ -1,0 +1,24 @@
+{
+  "_comment": "Copy this file to config.json and fill in `performers`. Edit other fields as needed.",
+  "output_dir": "downloads",
+  "performers": [
+    "example_user_1",
+    "example_user_2"
+  ],
+  "enabled_sites": [],
+  "max_videos_per_site": 200,
+  "min_probe_entries": 1,
+  "max_parallel_probes": 8,
+  "max_parallel_downloads": 3,
+  "min_disk_gb": 5.0,
+  "use_aria2c": true,
+  "aria2c_connections": 16,
+  "rate_limit": "",
+  "cookies_from_browser": "",
+  "cookies_file": "",
+  "impersonate_target": "chrome",
+  "min_duration_seconds": 30.0,
+  "retries": 5,
+  "probe_timeout": 60,
+  "verbose": false
+}

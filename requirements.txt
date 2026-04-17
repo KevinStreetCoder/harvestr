@@ -1,0 +1,13 @@
+# Core
+yt-dlp[default,curl-cffi]>=2026.01.01
+requests>=2.31.0
+cloudscraper>=1.2.71
+curl-cffi>=0.7.0
+rich>=13.7.0
+
+# Web UI
+flask>=3.0.0
+
+# Optional (system binaries, install separately):
+# - aria2c        → winget install aria2.aria2        (16x parallel MP4 downloads)
+# - ffmpeg        → https://www.gyan.dev/ffmpeg/builds/ (HLS / DASH / m3u8)

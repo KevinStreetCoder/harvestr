@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.venv/
+venv/
+env/
+build/
+dist/
+
+# Downloaded media — never commit
+downloads/
+tests/_smoke/
+*.mp4
+*.webm
+*.mkv
+*.mov
+*.m4v
+*.ts
+*.flv
+*.part
+*.part-*
+
+# Secrets / local config
+cookies.txt
+cookies_*.txt
+*.cookies.txt
+config.json
+!config.example.json
+
+# State files — generated at runtime
+universal.log
+history.json
+failed.json
+debug_*.html
+debug_*.txt
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*.bak
+*.orig
+.DS_Store
+Thumbs.db
+
+# OS / tool junk
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log

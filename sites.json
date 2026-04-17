@@ -1,0 +1,275 @@
+{
+  "_comment": "Site URL patterns for username-based enumeration. {u} = username. yt-dlp's extractor is tried against each pattern; first hit wins. Sites are listed most-reliable first within their tier. Disable any site by removing it from the 'enabled' list in config.json.",
+  "sites": {
+    "youtube": {
+      "category": "mainstream",
+      "patterns": [
+        "https://www.youtube.com/@{u}/videos",
+        "https://www.youtube.com/@{u}/streams",
+        "https://www.youtube.com/c/{u}/videos",
+        "https://www.youtube.com/user/{u}/videos"
+      ],
+      "yt_dlp_extractor": "youtube",
+      "supports_flat": true,
+      "notes": "YouTube handle format preferred (@user). Shorts/streams are separate tabs."
+    },
+    "twitch": {
+      "category": "mainstream",
+      "patterns": [
+        "https://www.twitch.tv/{u}/videos",
+        "https://www.twitch.tv/{u}/clips"
+      ],
+      "yt_dlp_extractor": "twitch",
+      "supports_flat": true,
+      "notes": "VODs and clips only; live streams handled separately."
+    },
+    "vimeo": {
+      "category": "mainstream",
+      "patterns": [
+        "https://vimeo.com/{u}",
+        "https://vimeo.com/user/{u}"
+      ],
+      "yt_dlp_extractor": "vimeo",
+      "supports_flat": true,
+      "notes": "Some users have numeric IDs instead of usernames."
+    },
+    "rumble": {
+      "category": "mainstream",
+      "patterns": [
+        "https://rumble.com/c/{u}",
+        "https://rumble.com/user/{u}"
+      ],
+      "yt_dlp_extractor": "rumble",
+      "supports_flat": true
+    },
+    "dailymotion": {
+      "category": "mainstream",
+      "patterns": [
+        "https://www.dailymotion.com/{u}"
+      ],
+      "yt_dlp_extractor": "dailymotion",
+      "supports_flat": true
+    },
+    "bitchute": {
+      "category": "mainstream",
+      "patterns": [
+        "https://www.bitchute.com/channel/{u}/"
+      ],
+      "yt_dlp_extractor": "bitchute",
+      "supports_flat": true
+    },
+    "odysee": {
+      "category": "mainstream",
+      "patterns": [
+        "https://odysee.com/@{u}",
+        "https://odysee.com/@{u}:c"
+      ],
+      "yt_dlp_extractor": "odysee",
+      "supports_flat": true
+    },
+    "soundcloud": {
+      "category": "mainstream",
+      "patterns": [
+        "https://soundcloud.com/{u}"
+      ],
+      "yt_dlp_extractor": "soundcloud",
+      "supports_flat": true
+    },
+    "archive_org": {
+      "category": "archive",
+      "patterns": [
+        "https://archive.org/details/@{u}"
+      ],
+      "yt_dlp_extractor": "archiveorg",
+      "supports_flat": true
+    },
+    "kick": {
+      "category": "mainstream",
+      "patterns": [
+        "https://kick.com/{u}/videos",
+        "https://kick.com/{u}/clips"
+      ],
+      "yt_dlp_extractor": "kick",
+      "supports_flat": true
+    },
+    "pornhub": {
+      "category": "adult",
+      "patterns": [
+        "https://www.pornhub.com/model/{u}",
+        "https://www.pornhub.com/pornstar/{u}",
+        "https://www.pornhub.com/users/{u}",
+        "https://www.pornhub.com/channels/{u}"
+      ],
+      "yt_dlp_extractor": "pornhub",
+      "supports_flat": true,
+      "notes": "Try model/pornstar/users/channels in order; first non-empty wins."
+    },
+    "xvideos": {
+      "category": "adult",
+      "patterns": [
+        "https://www.xvideos.com/profiles/{u}",
+        "https://www.xvideos.com/channels/{u}",
+        "https://www.xvideos.com/models/{u}"
+      ],
+      "yt_dlp_extractor": "xvideos",
+      "supports_flat": true
+    },
+    "xhamster": {
+      "category": "adult",
+      "patterns": [
+        "https://xhamster.com/users/{u}/videos",
+        "https://xhamster.com/creators/{u}/videos"
+      ],
+      "yt_dlp_extractor": "xhamster",
+      "supports_flat": true,
+      "notes": "May be flaky in early 2026 per upstream issues."
+    },
+    "spankbang": {
+      "category": "adult",
+      "patterns": [
+        "https://spankbang.com/profile/{u}/videos",
+        "https://spankbang.com/profile/{u}"
+      ],
+      "yt_dlp_extractor": "spankbang",
+      "supports_flat": true,
+      "notes": "Requires curl_cffi impersonation to bypass Cloudflare."
+    },
+    "xnxx": {
+      "category": "adult",
+      "patterns": [
+        "https://www.xnxx.com/pornstar/{u}",
+        "https://www.xnxx.com/profiles/{u}"
+      ],
+      "yt_dlp_extractor": "xnxx",
+      "supports_flat": true
+    },
+    "motherless": {
+      "category": "adult",
+      "patterns": [
+        "https://motherless.com/m/{u}"
+      ],
+      "yt_dlp_extractor": "motherless",
+      "supports_flat": true,
+      "notes": "Only /m/ (member uploads). /g/ is a group tag that returns unrelated videos."
+    },
+    "redtube": {
+      "category": "adult",
+      "patterns": [
+        "https://www.redtube.com/users/{u}"
+      ],
+      "yt_dlp_extractor": "redtube",
+      "supports_flat": false,
+      "notes": "Single-video extractor only; user pages scraped via raw HTML."
+    },
+    "_youporn_DISABLED": {
+      "category": "adult",
+      "patterns": [
+        "https://www.youporn.com/uservids/{u}/"
+      ],
+      "yt_dlp_extractor": "youporn",
+      "supports_flat": true,
+      "notes": "DISABLED: extractor falls through to site-wide enumeration for missing users, causing infinite page loops."
+    },
+    "tube8": {
+      "category": "adult",
+      "patterns": [
+        "https://www.tube8.com/profile/{u}/videos/"
+      ],
+      "yt_dlp_extractor": "tube8",
+      "supports_flat": true
+    },
+    "eporner": {
+      "category": "adult",
+      "patterns": [
+        "https://www.eporner.com/profile/{u}/"
+      ],
+      "yt_dlp_extractor": "eporner",
+      "supports_flat": true
+    },
+    "4tube": {
+      "category": "adult",
+      "patterns": [
+        "https://www.4tube.com/channels/{u}/videos",
+        "https://www.4tube.com/pornstars/{u}"
+      ],
+      "yt_dlp_extractor": "fourtube",
+      "supports_flat": true
+    },
+    "tnaflix": {
+      "category": "adult",
+      "patterns": [
+        "https://www.tnaflix.com/profile/{u}"
+      ],
+      "yt_dlp_extractor": "tnaflix",
+      "supports_flat": true
+    },
+    "drtuber": {
+      "category": "adult",
+      "patterns": [
+        "https://www.drtuber.com/user/{u}"
+      ],
+      "yt_dlp_extractor": "drtuber",
+      "supports_flat": true
+    },
+    "sxyprn": {
+      "category": "adult",
+      "patterns": [
+        "https://sxyprn.com/{u}.html"
+      ],
+      "yt_dlp_extractor": "yourporn",
+      "supports_flat": true,
+      "notes": "Previously YourPorn.sexy."
+    },
+    "manyvids": {
+      "category": "adult",
+      "patterns": [
+        "https://www.manyvids.com/Profile/{u}/Store/Videos/"
+      ],
+      "yt_dlp_extractor": "manyvids",
+      "supports_flat": false,
+      "notes": "Most content is paid; free preview clips only."
+    },
+    "keezmovies": {
+      "category": "adult",
+      "patterns": [
+        "https://www.keezmovies.com/pornstars/{u}"
+      ],
+      "yt_dlp_extractor": "keezmovies",
+      "supports_flat": true
+    },
+    "spankwire": {
+      "category": "adult",
+      "patterns": [
+        "https://www.spankwire.com/user/{u}/videos/"
+      ],
+      "yt_dlp_extractor": "spankwire",
+      "supports_flat": true
+    },
+    "beeg": {
+      "category": "adult",
+      "patterns": [
+        "https://beeg.com/model/{u}"
+      ],
+      "yt_dlp_extractor": "beeg",
+      "supports_flat": false,
+      "notes": "Tag-based; no dedicated user extractor."
+    },
+    "hotmovs": {
+      "category": "adult",
+      "patterns": [
+        "https://www.hotmovs.com/profile/{u}"
+      ],
+      "yt_dlp_extractor": "hotmovs",
+      "supports_flat": true
+    },
+    "camwhores_tv": {
+      "category": "adult",
+      "patterns": [
+        "https://camwhores.tv/models/{u}/"
+      ],
+      "yt_dlp_extractor": "generic",
+      "supports_flat": true,
+      "notes": "No dedicated yt-dlp extractor; relies on generic scraping. Only /models/ used (search/tags return unrelated videos)."
+    }
+  }
+}

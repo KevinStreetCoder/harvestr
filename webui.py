@@ -54,6 +54,13 @@ except Exception as _le:
     _live = None
     _live_available = False
 
+# ── Disk manager ─────────────────────────────────────────────────────────────
+try:
+    from disk_manager import DiskManager as _DiskManager
+    _disk = _DiskManager(downloads_dir=DOWNLOADS_DIR)
+except Exception:
+    _disk = None
+
 
 # ── State shared with background task ────────────────────────────────────────
 _state = {
@@ -728,6 +735,51 @@ INDEX_HTML = r"""
   .chip[data-sort] { background: var(--bg); }
   .chip[data-sort].active { background: var(--accent-2); color: white; border-color: var(--accent); }
 
+  /* Disk / Storage */
+  .drive-bar {
+    display: flex; height: 22px; border-radius: 6px; overflow: hidden;
+    background: var(--bg); border: 1px solid var(--border);
+    transition: all .3s;
+  }
+  .drive-bar .seg { height: 100%; transition: width .4s ease; }
+  .drive-bar .seg-archive { background: linear-gradient(90deg, var(--accent), var(--purple)); }
+  .drive-bar .seg-used    { background: var(--bg-3); }
+  .drive-bar .seg-free    { background: linear-gradient(90deg, #2a543a, #3a7d52); }
+  .drive-legend {
+    display: flex; gap: 16px; font-size: 12px; padding: 8px 4px 0;
+    flex-wrap: wrap;
+  }
+  .drive-legend .sw {
+    display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+    margin-right: 4px; vertical-align: middle;
+  }
+  .drive-legend .sw-archive { background: linear-gradient(135deg, var(--accent), var(--purple)); }
+  .drive-legend .sw-used    { background: var(--bg-3); border: 1px solid var(--border-2); }
+  .drive-legend .sw-free    { background: #3a7d52; }
+
+  .disk-perf-row {
+    display: grid; grid-template-columns: 180px 1fr 90px 70px auto;
+    gap: 10px; align-items: center; padding: 8px 10px;
+    border-bottom: 1px solid var(--border); font-size: 12.5px;
+    transition: background .12s;
+  }
+  .disk-perf-row:hover { background: var(--bg-3); }
+  .disk-perf-row:last-child { border-bottom: none; }
+  .disk-perf-row .pname { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .disk-perf-row .pmeter {
+    height: 8px; background: var(--bg); border-radius: 4px; overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .disk-perf-row .pmeter-fill {
+    height: 100%; background: linear-gradient(90deg, var(--accent-2), var(--accent), var(--purple));
+    transition: width .3s;
+  }
+  .disk-perf-row .psize { text-align: right; font-family: "JetBrains Mono", monospace; font-size: 11.5px; color: var(--text-2); }
+  .disk-perf-row .pcount { text-align: right; color: var(--text-3); font-size: 11.5px; }
+
+  .drive-legend #disk-lbl-warn.warn { color: var(--warn); font-weight: 600; }
+  .drive-legend #disk-lbl-warn.bad  { color: var(--bad);  font-weight: 600; }
+
   /* Empty state */
   .empty-state {
     text-align: center; padding: 48px 24px; color: var(--text-3);
@@ -935,6 +987,56 @@ INDEX_HTML = r"""
         <span class="muted" style="font-weight:normal; margin-left:auto;" id="auth-summary"></span>
       </h2>
       <div id="auth-list"></div>
+    </div>
+
+    <!-- Storage / Disk Management -->
+    <div class="card" style="grid-column: 1 / -1;">
+      <h2>
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+        Storage
+        <span class="muted" style="margin-left:auto; font-weight:normal;" id="disk-summary"></span>
+      </h2>
+
+      <!-- Drive status bar -->
+      <div id="disk-drive-bar" class="drive-bar">
+        <div class="seg seg-archive" id="disk-seg-archive"
+             data-tip="Harvestr downloads"></div>
+        <div class="seg seg-used" id="disk-seg-other"
+             data-tip="Other files on this drive"></div>
+        <div class="seg seg-free" id="disk-seg-free" data-tip="Free"></div>
+      </div>
+      <div class="drive-legend muted">
+        <span><span class="sw sw-archive"></span> <span id="disk-lbl-archive">–</span> Harvestr</span>
+        <span><span class="sw sw-used"></span> <span id="disk-lbl-other">–</span> Other</span>
+        <span><span class="sw sw-free"></span> <span id="disk-lbl-free">–</span> Free</span>
+        <span style="margin-left:auto;" id="disk-lbl-warn"></span>
+      </div>
+
+      <!-- Cleanup actions -->
+      <div class="filter-row" style="margin-top: 14px;" role="toolbar" aria-label="Cleanup actions">
+        <button onclick="diskPruneOlder()" data-tip="Remove files older than N days">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Prune older than…
+        </button>
+        <button onclick="diskPruneToFree()" data-tip="Delete oldest until N GB free">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+          Free up space…
+        </button>
+        <button onclick="runDedup()" data-tip="Content-based dedup scan">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="10" height="10" rx="1"/><rect x="11" y="11" width="10" height="10" rx="1"/></svg>
+          Dedup
+        </button>
+        <div style="margin-left:auto; display:flex; gap:6px; align-items:center;">
+          <span class="muted" style="font-size:11.5px;">Sort:</span>
+          <button class="chip" data-disk-sort="size" onclick="diskSetSort('size')">size</button>
+          <button class="chip" data-disk-sort="count" onclick="diskSetSort('count')">count</button>
+          <button class="chip" data-disk-sort="name" onclick="diskSetSort('name')">name</button>
+          <button class="chip" data-disk-sort="newest" onclick="diskSetSort('newest')">newest</button>
+        </div>
+      </div>
+
+      <!-- Per-performer usage -->
+      <div id="disk-performers" style="margin-top:10px;"></div>
     </div>
 
     <!-- Downloaded videos -->
@@ -1710,7 +1812,8 @@ async function runDedup() {
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 async function refreshAll() {
-  await Promise.all([loadSites(), loadAuth(), loadConfig(), loadHistory(), refreshStatus(), refreshProgress()]);
+  await Promise.all([loadSites(), loadAuth(), loadConfig(), loadHistory(),
+                     refreshStatus(), refreshProgress(), loadDisk(true)]);
   toast('Refreshed');
 }
 
@@ -1917,12 +2020,157 @@ async function liveToggleAll(on) {
   } catch(e) { toast('Error: '+e.message, 'error'); }
 }
 
+// ── Disk / Storage ───────────────────────────────────────────────────────
+let _diskSnapshot = null;
+let _diskSort = 'size';
+
+async function loadDisk(force = false) {
+  try {
+    _diskSnapshot = await api('/api/disk' + (force ? '?force=1' : ''));
+    renderDisk();
+  } catch(e) { console.error('loadDisk', e); }
+}
+
+function diskSetSort(mode) {
+  _diskSort = mode;
+  document.querySelectorAll('[data-disk-sort]').forEach(el => {
+    el.classList.toggle('active', el.dataset.diskSort === mode);
+  });
+  renderDisk();
+}
+
+function renderDisk() {
+  if (!_diskSnapshot) return;
+  const d = _diskSnapshot;
+  const drv = d.drive || {};
+  const total = drv.total_bytes || 1;
+  const archivePct = 100 * (drv.archive_bytes || 0) / total;
+  const otherPct = 100 * ((drv.used_bytes || 0) - (drv.archive_bytes || 0)) / total;
+  const freePct = 100 * (drv.free_bytes || 0) / total;
+
+  document.getElementById('disk-seg-archive').style.width = archivePct + '%';
+  document.getElementById('disk-seg-other').style.width = Math.max(0, otherPct) + '%';
+  document.getElementById('disk-seg-free').style.width = freePct + '%';
+
+  document.getElementById('disk-lbl-archive').textContent = bytesHuman(drv.archive_bytes || 0);
+  document.getElementById('disk-lbl-other').textContent = bytesHuman(Math.max(0, (drv.used_bytes||0) - (drv.archive_bytes||0)));
+  document.getElementById('disk-lbl-free').textContent = bytesHuman(drv.free_bytes || 0);
+
+  // Free-space warning
+  const warn = document.getElementById('disk-lbl-warn');
+  const freeGB = (drv.free_bytes || 0) / (1024**3);
+  warn.className = '';
+  if (freeGB < 2) {
+    warn.textContent = `⚠ only ${freeGB.toFixed(1)} GB free`;
+    warn.classList.add('bad');
+  } else if (freeGB < 10) {
+    warn.textContent = `low space: ${freeGB.toFixed(1)} GB free`;
+    warn.classList.add('warn');
+  } else {
+    warn.textContent = '';
+  }
+
+  // Summary top-right
+  document.getElementById('disk-summary').textContent =
+    `${d.performers.length} performers · ${bytesHuman(drv.archive_bytes || 0)} archived`;
+
+  // Per-performer bars
+  const perfs = [...d.performers];
+  const sorts = {
+    size:   (a,b) => b.bytes - a.bytes,
+    count:  (a,b) => b.files - a.files,
+    name:   (a,b) => a.name.localeCompare(b.name),
+    newest: (a,b) => (b.newest || '').localeCompare(a.newest || ''),
+  };
+  perfs.sort(sorts[_diskSort] || sorts.size);
+  const maxBytes = perfs.length ? perfs[0].bytes || 1 : 1;
+
+  const root = document.getElementById('disk-performers');
+  root.innerHTML = perfs.map(p => {
+    const pct = Math.min(100, 100 * p.bytes / maxBytes);
+    return `<div class="disk-perf-row">
+      <span class="pname" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</span>
+      <div class="pmeter"><div class="pmeter-fill" style="width:${pct}%"></div></div>
+      <span class="psize">${bytesHuman(p.bytes)}</span>
+      <span class="pcount">${p.files} files</span>
+      <button class="xs danger" onclick="diskWipe('${escapeHtml(p.name).replace(/'/g,'&#39;')}')"
+              data-tip="Delete all videos for this performer" aria-label="Delete ${escapeHtml(p.name)}">✕</button>
+    </div>`;
+  }).join('') || `<div class="empty-state">No downloads yet.</div>`;
+}
+
+async function diskWipe(performer) {
+  if (!confirm(
+    `DELETE every video for "${performer}"?\n\n` +
+    `This will also remove matching entries from history.json so they can be\n` +
+    `re-downloaded if you run this performer again later.\n\n` +
+    `This cannot be undone.`)) return;
+  try {
+    const r = await api('/api/disk/wipe', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({performer, confirm: true})});
+    toast(`Removed ${r.removed} files · freed ${bytesHuman(r.bytes_freed)}`, 'success');
+    loadDisk(true);
+    loadHistory();
+  } catch(e) { toast('Error: '+e.message, 'error'); }
+}
+
+async function diskPruneOlder() {
+  const raw = prompt('Delete videos older than how many days?\n(dry-run first, then confirm)', '90');
+  if (!raw) return;
+  const days = parseInt(raw, 10);
+  if (!days || days < 1) { toast('Enter a positive integer', 'error'); return; }
+  try {
+    const preview = await api('/api/disk/prune_older', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({days})});
+    if (preview.file_count === 0) { toast('Nothing older than ' + days + ' days'); return; }
+    if (!confirm(
+      `Found ${preview.file_count} files older than ${days} days\n` +
+      `(would free ${bytesHuman(preview.would_free_bytes)}).\n\nDelete them?`)) return;
+    const r = await api('/api/disk/prune_older', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({days, apply: true})});
+    toast(`Removed ${r.removed} files · freed ${bytesHuman(r.bytes_freed)}`, 'success');
+    loadDisk(true); loadHistory();
+  } catch(e) { toast('Error: '+e.message, 'error'); }
+}
+
+async function diskPruneToFree() {
+  const raw = prompt('Delete oldest videos until how many GB are free?\n(dry-run first)', '25');
+  if (!raw) return;
+  const gb = parseFloat(raw);
+  if (!gb || gb <= 0) { toast('Enter a positive number', 'error'); return; }
+  try {
+    const preview = await api('/api/disk/prune_to_free', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({target_free_gb: gb})});
+    if (preview.nothing_to_do) {
+      toast(`Already have ${preview.already_free_gb.toFixed(1)} GB free — no action needed`);
+      return;
+    }
+    if (!confirm(
+      `Would delete ${preview.would_delete} files to free ${bytesHuman(preview.would_free_bytes)}.\n` +
+      (preview.still_needed_bytes > 0
+        ? `(Not enough old content — ${bytesHuman(preview.still_needed_bytes)} short of target.)\n` : '') +
+      `Continue?`)) return;
+    const r = await api('/api/disk/prune_to_free', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({target_free_gb: gb, apply: true})});
+    toast(`Removed ${r.removed} files · freed ${bytesHuman(r.bytes_freed)}`, 'success');
+    loadDisk(true); loadHistory();
+  } catch(e) { toast('Error: '+e.message, 'error'); }
+}
+
 // ── Command palette (Ctrl+K) ─────────────────────────────────────────────
 const _paletteCmds = [
   {label:'Refresh everything',  kbd:'F5',     run:() => refreshAll()},
   {label:'Start all downloads', kbd:'',       run:() => startDownload()},
   {label:'Stop download',       kbd:'',       run:() => stopDownload()},
   {label:'Run dedup',           kbd:'',       run:() => runDedup()},
+  {label:'Refresh storage',     kbd:'',       run:() => { switchTab('archive'); loadDisk(true); }},
+  {label:'Prune old videos…',   kbd:'',       run:() => { switchTab('archive'); diskPruneOlder(); }},
+  {label:'Free up disk space…', kbd:'',       run:() => { switchTab('archive'); diskPruneToFree(); }},
   {label:'Open Archive tab',    kbd:'1',      run:() => switchTab('archive')},
   {label:'Open Live tab',       kbd:'2',      run:() => switchTab('live')},
   {label:'Focus add-performer',  kbd:'',      run:() => {switchTab('archive'); document.getElementById('new-perf').focus();}},
@@ -1997,10 +2245,12 @@ document.addEventListener('keydown', (e) => {
   await loadHistory();
   await refreshStatus();
   await refreshProgress();
+  await loadDisk();
   setInterval(refreshStatus, 2000);
   setInterval(refreshProgress, 700);   // fast cadence for progress bar
   setInterval(loadHistory, 15000);
   setInterval(loadAuth, 30000);
+  setInterval(loadDisk, 20000);        // disk snapshot every 20s
   // Live polling — only every 3s and only when Live tab visible
   setInterval(() => { if (_currentPage === 'live') liveRefresh(); }, 3000);
   // Always pull ONCE so the "Live" tab badge can update even from Archive tab
@@ -2220,6 +2470,79 @@ def api_stop():
         _state["pid"] = None
         _runner_thread = None
     return jsonify({"ok": True})
+
+
+@app.route("/api/disk")
+def api_disk():
+    """Snapshot: per-performer bytes, per-site totals, free space on drive.
+    Cached for 3 s on the backend — safe to poll aggressively."""
+    if not _disk:
+        return jsonify({"error": "disk manager unavailable"}), 500
+    force = request.args.get("force") == "1"
+    return jsonify(_disk.snapshot(force=force))
+
+
+@app.route("/api/disk/wipe", methods=["POST"])
+def api_disk_wipe():
+    """Delete every video for one performer. Hard op — requires confirm."""
+    if not _disk:
+        return jsonify({"error": "disk manager unavailable"}), 500
+    body = request.get_json(force=True) or {}
+    performer = (body.get("performer") or "").strip()
+    if not performer:
+        return jsonify({"error": "performer required"}), 400
+    if not body.get("confirm"):
+        return jsonify({"error": "confirm=true required for destructive op"}), 400
+    return jsonify(_disk.wipe_performer(performer))
+
+
+@app.route("/api/disk/delete", methods=["POST"])
+def api_disk_delete():
+    """Delete a specific list of paths."""
+    if not _disk:
+        return jsonify({"error": "disk manager unavailable"}), 500
+    body = request.get_json(force=True) or {}
+    paths = body.get("paths") or []
+    if not isinstance(paths, list) or not paths:
+        return jsonify({"error": "paths[] required"}), 400
+    if not body.get("confirm"):
+        return jsonify({"error": "confirm=true required"}), 400
+    return jsonify(_disk.delete_files(paths))
+
+
+@app.route("/api/disk/prune_older", methods=["POST"])
+def api_disk_prune_older():
+    if not _disk:
+        return jsonify({"error": "disk manager unavailable"}), 500
+    body = request.get_json(force=True) or {}
+    days = int(body.get("days") or 0)
+    if days < 1:
+        return jsonify({"error": "days must be >= 1"}), 400
+    return jsonify(_disk.prune_older_than(days, apply=bool(body.get("apply"))))
+
+
+@app.route("/api/disk/prune_to_free", methods=["POST"])
+def api_disk_prune_to_free():
+    if not _disk:
+        return jsonify({"error": "disk manager unavailable"}), 500
+    body = request.get_json(force=True) or {}
+    target = float(body.get("target_free_gb") or 0.0)
+    if target <= 0:
+        return jsonify({"error": "target_free_gb must be > 0"}), 400
+    return jsonify(_disk.prune_to_free(target, apply=bool(body.get("apply"))))
+
+
+@app.route("/api/disk/enforce_cap", methods=["POST"])
+def api_disk_enforce_cap():
+    if not _disk:
+        return jsonify({"error": "disk manager unavailable"}), 500
+    body = request.get_json(force=True) or {}
+    performer = (body.get("performer") or "").strip()
+    cap = float(body.get("max_gb") or 0.0)
+    if not performer or cap <= 0:
+        return jsonify({"error": "performer + max_gb required"}), 400
+    return jsonify(_disk.enforce_performer_cap(performer, cap,
+                                               apply=bool(body.get("apply"))))
 
 
 @app.route("/api/live/sites")

@@ -195,7 +195,38 @@ python universal_downloader.py --list-sites
 python universal_downloader.py alice_example -v
 ```
 
-### Content-based deduplication
+### Storage management
+
+The web UI's Archive tab now has a **Storage** card that shows:
+
+- **Drive bar** — horizontal stacked chart of Harvestr archive / other files / free space
+- **Free-space warning** — bar turns yellow under 10 GB free, red under 2 GB
+- **Per-performer meter** — each performer is a row with a proportional fill bar, byte total, file count, and a ✕ button to wipe them
+- **Cleanup tools**: "Prune older than…", "Free up space…" (prune oldest until N GB free), "Dedup"
+
+All destructive ops are **2-step confirm** with dry-run preview:
+
+```
+Prune older than 90 days?
+→ Found 23 files (would free 1.8 GB)
+→ Delete them? [OK / Cancel]
+```
+
+### Programmatic API (also callable from the command palette, Ctrl+K)
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/disk` | GET | Snapshot (cached 3 s) |
+| `/api/disk/wipe` | POST | Remove every video for a performer (requires `confirm:true`) |
+| `/api/disk/delete` | POST | Remove specific file paths |
+| `/api/disk/prune_older` | POST | Remove files older than N days (dry-run by default; add `apply:true`) |
+| `/api/disk/prune_to_free` | POST | Remove oldest until N GB free |
+| `/api/disk/enforce_cap` | POST | Keep a performer's archive under N GB by deleting oldest |
+
+History.json is kept in sync automatically — if you wipe a performer, their
+entries disappear from history so they'll re-download cleanly on the next run.
+
+## Content-based deduplication
 
 ```powershell
 python dedupe.py            # scan & report, no changes

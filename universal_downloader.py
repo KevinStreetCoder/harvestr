@@ -233,6 +233,13 @@ class UniversalConfig:
     #   socks5://127.0.0.1:9150            (Tor)
     #   http://127.0.0.1:8080              (local Squid / HTTP proxy)
     download_proxy: str = ""
+    # Retention rules (auto-applied between runs by the webui / downloader):
+    #   max_per_performer_gb = 0        no per-performer cap
+    #   auto_prune_days      = 0        never auto-delete by age
+    # These are advisory — the downloader logs warnings but never deletes
+    # unless the user explicitly runs the corresponding /api/disk endpoint.
+    max_per_performer_gb: float = 0.0
+    auto_prune_days: int = 0
 
     @classmethod
     def load(cls, path: Path) -> "UniversalConfig":

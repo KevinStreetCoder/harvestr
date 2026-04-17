@@ -687,8 +687,12 @@ class UniversalDownloader:
                 "username": config.camsmut_username,
                 "password": config.camsmut_password,
             }
+        # Respect enabled_sites for custom scrapers too. If enabled_sites is
+        # empty (== "all"), pass None to load every registered scraper;
+        # otherwise filter to the intersection.
+        enabled = config.enabled_sites or None
         self.custom_scrapers: List[_CustomSiteScraper] = _load_custom_scrapers(
-            log, cookies_file=config.cookies_file,
+            log, enabled_names=enabled, cookies_file=config.cookies_file,
             site_credentials=site_credentials,
         )
 
@@ -715,11 +719,20 @@ class UniversalDownloader:
                 jobs.append((site, pattern.format(u=performer), idx))
 
         self.log.info(f"Probing {len(jobs)} URL patterns across {len(sites)} sites for '{performer}'")
+        # Surface probe progress to the UI.
+        self.progress.set_phase("probing", f"Probing {len(sites)} sites...")
+        probe_counter = [0]   # mutable box for inner closure
+        probe_lock = threading.Lock()
 
         min_entries = max(1, self.config.min_probe_entries)
         def probe_one(job):
             site, url, idx = job
-            info = self.engine.probe(url)
+            try:
+                info = self.engine.probe(url)
+            finally:
+                with probe_lock:
+                    probe_counter[0] += 1
+                    self.progress.note_probe(site.name, probe_counter[0], len(jobs))
             if not info:
                 return None
             entries = info.get("entries") or []
@@ -790,6 +803,7 @@ class UniversalDownloader:
             candidates.sort(key=lambda t: (-t[1].entry_count, t[0]))
             best = candidates[0][1]
             hits.append(best)
+            self.progress.note_hit(best.site, best.entry_count)
             self.log.info(f"  HIT: {best.site} ({best.entry_count} videos) @ {best.url}")
             if len(candidates) > 1:
                 others = [f"{c[1].url[:60]} ({c[1].entry_count})" for c in candidates[1:]]
@@ -811,10 +825,27 @@ class UniversalDownloader:
             for v in variants:
                 jobs.append((scraper, v))
 
+        # Track custom-scraper probe progress alongside yt-dlp's so the UI
+        # reflects the full probe pipeline.
+        cp_counter = [0]
+        cp_lock = threading.Lock()
+        total_probes = self.progress.session.get("probe_total", 0) + len(jobs)
+        base_done = self.progress.session.get("probe_done", 0)
+        with cp_lock:
+            self.progress.set_phase("probing", f"Probing {len(self.custom_scrapers)} custom scrapers...")
+            self.progress.note_probe("", base_done, total_probes)
+
         def _probe(job):
             scraper, variant = job
             try:
                 hit = scraper.probe(variant)
+            finally:
+                with cp_lock:
+                    cp_counter[0] += 1
+                    self.progress.note_probe(
+                        scraper.NAME, base_done + cp_counter[0], total_probes,
+                    )
+            try:
                 if hit:
                     return (scraper, hit, variant)
             except Exception as e:
@@ -876,6 +907,7 @@ class UniversalDownloader:
         for scraper, hit, variant in results:
             tag = f" [variant:{variant}]" if variant != performer else ""
             self.log.info(f"  HIT: {hit.site} ({hit.entry_count} videos) @ {hit.url}{tag}")
+            self.progress.note_hit(hit.site, hit.entry_count)
         return results
 
     def enumerate_custom(self, scraper: _CustomSiteScraper, hit, performer: str) -> List[VideoRef]:
@@ -1447,6 +1479,9 @@ class UniversalDownloader:
                 t.add_row(h.site, "custom", str(h.entry_count), h.url[:70] + tag)
             console.print(t)
 
+        self.progress.set_phase("enumerating",
+                                 f"Enumerating {total_hits} site hits...")
+
         all_new: List[VideoRef] = []
         # Enumerate yt-dlp hits
         for hit in yt_hits:
@@ -1505,10 +1540,13 @@ class UniversalDownloader:
             self.progress.session_end()
             return summary
 
+        self.progress.set_phase("downloading",
+                                 f"Downloading {len(all_new)} videos...")
         stats = self.download_videos(all_new)
         summary["downloaded"] = stats["ok"]
         summary["failed"] = stats["fail"]
         self.log.info(f"'{performer}' done: {stats['ok']} OK, {stats['fail']} failed, {stats['skip']} skipped")
+        self.progress.set_phase("done", f"Done: {stats['ok']} OK, {stats['fail']} failed")
         self.progress.session_end()
         return summary
 

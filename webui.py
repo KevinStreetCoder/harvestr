@@ -492,6 +492,39 @@ INDEX_HTML = r"""
   @keyframes shimmer { 0%{background-position:0% 0;} 100%{background-position:200% 0;} }
   .dl-empty { color: var(--text-3); font-size: 12.5px; padding: 12px; text-align: center; }
 
+  .phase-panel {
+    background: #0b1320; border: 1px solid #1c2438; border-radius: 8px;
+    padding: 10px 12px; margin-bottom: 10px;
+  }
+  .phase-panel.done { background: #0b2318; border-color: #1d4d31; }
+  .phase-panel .phase-line {
+    display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px;
+  }
+  .phase-panel .phase-label {
+    font-size: 12.5px; font-weight: 600; color: var(--accent);
+  }
+  .phase-panel.done .phase-label { color: var(--good); }
+  .phase-panel .phase-meta {
+    margin-left: auto; font-size: 11.5px; color: var(--text-3);
+    font-family: "JetBrains Mono", Consolas, monospace;
+  }
+  .phase-panel code {
+    background: var(--bg-3); padding: 1px 5px; border-radius: 3px;
+    font-size: 10.5px; color: var(--accent);
+  }
+
+  .hits-row {
+    padding: 8px 12px; background: #0a1320; border: 1px solid #1c2438;
+    border-radius: 8px; margin-bottom: 10px; line-height: 1.9;
+    font-size: 12px;
+  }
+  .hits-row .hits-label {
+    color: var(--text-3); margin-right: 6px; font-weight: 500;
+  }
+  .pill.hit-pill {
+    background: #103d1d; color: #6dea8c; border-color: #225a2d;
+  }
+
   /* Tooltips */
   [data-tip] { position: relative; }
   [data-tip]:hover::after {
@@ -872,36 +905,85 @@ async function refreshProgress() {
     }
     card.style.display = 'block';
 
-    // Session summary
+    // Session summary (top-right of the card header)
     const bits = [];
     if (sess.performer) bits.push('<b>' + escapeHtml(sess.performer) + '</b>');
     if (sess.total_queued) bits.push(`${sess.ok||0}/${sess.total_queued} done`);
-    else bits.push(`${sess.ok||0} ok`);
+    else if ((sess.ok||0) > 0 || (sess.fail||0) > 0) bits.push(`${sess.ok||0} ok`);
     if (sess.fail) bits.push(`<span style="color:var(--bad)">${sess.fail} failed</span>`);
     if (sess.skip) bits.push(`<span style="color:var(--warn)">${sess.skip} skipped</span>`);
     sessEl.innerHTML = bits.join(' · ');
 
-    if (active.length === 0) {
-      listEl.innerHTML = '<div class="dl-empty">' +
-        (sess.running ? 'Session active — preparing next download…' : 'No active downloads.') +
-        '</div>';
-      return;
-    }
-    listEl.innerHTML = active.map(a => {
-      const pct = Math.min(100, Math.max(0, a.percent || 0));
-      const done = bytesHuman(a.bytes_done || 0);
-      const total = a.bytes_total ? bytesHuman(a.bytes_total) : '?';
-      const speed = a.speed_bps ? bytesHuman(a.speed_bps) + '/s' : '—';
-      const eta = a.eta_seconds ? secsHuman(a.eta_seconds) : '—';
-      return `<div class="dl-active">
-        <div class="top">
-          <span class="pill ${a.backend === 'yt-dlp' ? 'ytdlp' : 'custom'}">${escapeHtml(a.site || '?')}</span>
-          <span class="title" title="${escapeHtml(a.title || '')}">${escapeHtml(a.title || a.video_id || '')}</span>
-          <span class="meta">${done} / ${total} · ${speed} · ETA ${eta} · ${pct.toFixed(1)}%</span>
+    // Phase / activity summary
+    const phase = sess.phase || '';
+    const phaseIcon = {probing:'🛰', enumerating:'📋', downloading:'⬇', done:'✔'}[phase] || '⏳';
+    let phaseHtml = '';
+    if (phase === 'probing' && sess.probe_total) {
+      const pct = Math.min(100, Math.floor(100 * (sess.probe_done||0) / sess.probe_total));
+      phaseHtml = `<div class="phase-panel">
+        <div class="phase-line">
+          <span class="phase-label">${phaseIcon} ${escapeHtml(sess.phase_label || 'Probing sites...')}</span>
+          <span class="phase-meta">${sess.probe_done||0} / ${sess.probe_total} probes · ${pct}%${sess.current_site ? ' · latest <code>'+escapeHtml(sess.current_site)+'</code>' : ''}</span>
         </div>
         <div class="progress-bar"><div class="fill" style="width:${pct}%"></div></div>
       </div>`;
-    }).join('');
+    } else if (phase === 'enumerating') {
+      phaseHtml = `<div class="phase-panel">
+        <div class="phase-line">
+          <span class="phase-label">${phaseIcon} ${escapeHtml(sess.phase_label || 'Enumerating hits...')}</span>
+          <span class="phase-meta">${sess.videos_found||0} videos found so far</span>
+        </div>
+      </div>`;
+    } else if (phase === 'downloading' && sess.total_queued) {
+      const done = (sess.ok||0) + (sess.fail||0) + (sess.skip||0);
+      const pct = Math.min(100, Math.floor(100 * done / sess.total_queued));
+      phaseHtml = `<div class="phase-panel">
+        <div class="phase-line">
+          <span class="phase-label">${phaseIcon} ${escapeHtml(sess.phase_label || 'Downloading...')}</span>
+          <span class="phase-meta">${done} / ${sess.total_queued} videos · ${pct}%</span>
+        </div>
+        <div class="progress-bar"><div class="fill" style="width:${pct}%"></div></div>
+      </div>`;
+    } else if (phase === 'done') {
+      phaseHtml = `<div class="phase-panel done">
+        <span class="phase-label">${phaseIcon} ${escapeHtml(sess.phase_label || 'Done')}</span>
+      </div>`;
+    }
+
+    // Hits summary: which sites found content
+    let hitsHtml = '';
+    if ((sess.sites_hit || []).length > 0) {
+      hitsHtml = `<div class="hits-row"><span class="hits-label">Sites with videos:</span> ` +
+        sess.sites_hit.slice().sort((a,b) => (b.count||0) - (a.count||0))
+          .map(h => `<span class="pill hit-pill">${escapeHtml(h.site)} · ${h.count}</span>`)
+          .join(' ') + '</div>';
+    }
+
+    // Active downloads rows
+    let activeHtml = '';
+    if (active.length) {
+      activeHtml = active.map(a => {
+        const pct = Math.min(100, Math.max(0, a.percent || 0));
+        const done = bytesHuman(a.bytes_done || 0);
+        const total = a.bytes_total ? bytesHuman(a.bytes_total) : '?';
+        const speed = a.speed_bps ? bytesHuman(a.speed_bps) + '/s' : '—';
+        const eta = a.eta_seconds ? secsHuman(a.eta_seconds) : '—';
+        return `<div class="dl-active">
+          <div class="top">
+            <span class="pill ${a.backend === 'yt-dlp' ? 'ytdlp' : 'custom'}">${escapeHtml(a.site || '?')}</span>
+            <span class="title" title="${escapeHtml(a.title || '')}">${escapeHtml(a.title || a.video_id || '')}</span>
+            <span class="meta">${done} / ${total} · ${speed} · ETA ${eta} · ${pct.toFixed(1)}%</span>
+          </div>
+          <div class="progress-bar"><div class="fill" style="width:${pct}%"></div></div>
+        </div>`;
+      }).join('');
+    } else if (phase === 'downloading') {
+      activeHtml = '<div class="dl-empty">Queue ready — waiting for next slot…</div>';
+    } else if (!phase || phase === 'idle') {
+      activeHtml = '<div class="dl-empty">Session starting — initializing scrapers…</div>';
+    }
+
+    listEl.innerHTML = phaseHtml + hitsHtml + activeHtml;
   } catch (e) { console.error('progress', e); }
 }
 
@@ -1182,6 +1264,9 @@ async function loadHistory() {
   _populateHistSites();
   renderHistory();
   renderFailed();
+  // Performer counts depend on history — re-render so each row shows
+  // its real video count instead of 0.
+  renderPerformers();
 }
 function _populateHistSites() {
   const sel = document.getElementById('hist-site');

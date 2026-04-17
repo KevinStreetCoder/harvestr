@@ -72,6 +72,14 @@ class ProgressTracker:
             "fail": 0,
             "skip": 0,
             "total_queued": 0,
+            # Phase of the pipeline: probing | enumerating | downloading | done
+            "phase": "idle",
+            "phase_label": "",            # human-readable, e.g. "Probing 50 sites..."
+            "probe_done": 0,              # sites probed so far
+            "probe_total": 0,             # total sites to probe
+            "current_site": "",           # site currently being worked
+            "videos_found": 0,            # running total of video refs enumerated
+            "sites_hit": [],              # list of {site, count} for sites that returned videos
         }
         self._active: Dict[int, Dict[str, Any]] = {}  # slot_id -> video entry
         self._slot_counter = 0
@@ -89,8 +97,36 @@ class ProgressTracker:
                 "started_at": _now_iso(),
                 "total_queued": total_queued,
                 "ok": 0, "fail": 0, "skip": 0,
+                "phase": "probing", "phase_label": "Probing sites...",
+                "probe_done": 0, "probe_total": 0,
+                "current_site": "", "videos_found": 0,
+                "sites_hit": [],
             })
             self._active.clear()
+        self._flush()
+
+    def set_phase(self, phase: str, label: str = "") -> None:
+        """One of: probing | enumerating | downloading | done"""
+        with self._lock:
+            self.session["phase"] = phase
+            self.session["phase_label"] = label or phase.capitalize() + "..."
+        self._flush()
+
+    def note_probe(self, site: str, done: int, total: int) -> None:
+        with self._lock:
+            self.session["current_site"] = site
+            self.session["probe_done"] = done
+            self.session["probe_total"] = total
+        self._flush()
+
+    def note_hit(self, site: str, count: int) -> None:
+        with self._lock:
+            hits = self.session.get("sites_hit", [])
+            # Replace existing entry for this site if present (dedup)
+            hits = [h for h in hits if h.get("site") != site]
+            hits.append({"site": site, "count": int(count)})
+            self.session["sites_hit"] = hits
+            self.session["videos_found"] = sum(h.get("count", 0) for h in hits)
         self._flush()
 
     def session_update(self, **kw) -> None:

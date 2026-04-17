@@ -1312,6 +1312,46 @@ class CoomerKemonoBase(SiteScraper):
     _catalog_cache: Dict[str, List[dict]] = {}
     _catalog_lock_key = object()
 
+    # CDN-health cache: {base_url: (is_up, checked_at_epoch)}
+    # A single pre-flight HEAD to the video-CDN host tells us whether
+    # downloads will actually work. Avoids enqueuing hundreds of doomed
+    # downloads when the shard CDN is globally null-routed (as happened
+    # in 2026-04 when Coomer's 91.149.227.0/24 disappeared from BGP).
+    _cdn_health_cache: Dict[str, tuple] = {}
+    CDN_HEALTH_TTL = 300   # 5-minute cache
+
+    def _cdn_reachable(self) -> bool:
+        """Quick check: can we actually fetch a file from the shard CDN?
+        Probes a tiny thumbnail URL with a 6-second timeout. Cached."""
+        now = time.time()
+        cached = self._cdn_health_cache.get(self.BASE_URL)
+        if cached and (now - cached[1]) < self.CDN_HEALTH_TTL:
+            return cached[0]
+        # Probe: request the 302 redirect target by following one hop
+        probe_url = f"{self.BASE_URL}/"
+        try:
+            r = self.session.get(probe_url, timeout=6, allow_redirects=False)
+            # Main site reachable OK. Now try a shard URL explicitly.
+            # We synthesize a shard hostname from the BASE_URL host.
+            import urllib.parse
+            host = urllib.parse.urlparse(self.BASE_URL).hostname or ""
+            # Shard hosts are nN.<apex>
+            shard = f"n1.{host}"
+            try:
+                sock = __import__("socket").create_connection((shard, 443), timeout=5)
+                sock.close()
+                is_up = True
+            except OSError as e:
+                self.log.warning(f"  [{self.NAME}] shard CDN unreachable "
+                                 f"({shard}: {e.__class__.__name__}) — "
+                                 f"downloads would fail, skipping download phase")
+                is_up = False
+        except Exception as e:
+            self.log.debug(f"  [{self.NAME}] CDN health probe: {e}")
+            is_up = True  # be optimistic if probe itself errors
+        self._cdn_health_cache[self.BASE_URL] = (is_up, now)
+        return is_up
+
     def _make_session(self) -> requests.Session:
         s = requests.Session()
         # DDoS-Guard bypass: server instruction is to send Accept: text/css
@@ -1457,8 +1497,17 @@ class CoomerKemonoBase(SiteScraper):
         return videos
 
     def extract_stream(self, video: VideoRef) -> bool:
-        """Coomer/Kemono URLs are already direct — just set up download headers."""
+        """Coomer/Kemono URLs are already direct — just set up download headers.
+
+        Fast-fails when the shard CDN is unreachable from this network
+        (common in 2026 due to Coomer's 91.149.227.x subnet being
+        null-routed globally). Reports `stream_kind = "cdn_blocked"` so
+        the downloader marks the failure permanent and skips the retry.
+        """
         if not video.video_url:
+            return False
+        if not self._cdn_reachable():
+            video.stream_kind = "cdn_blocked"
             return False
         video.stream_url = video.video_url
         video.stream_kind = "mp4"

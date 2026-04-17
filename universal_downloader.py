@@ -1318,6 +1318,14 @@ class UniversalDownloader:
                         self.failed.record_failure(v, "private/members-only (404 equivalent)", 0)
                     self.log.info(f"  PRIVATE: {v.site}/{v.video_id}: {cv.title[:60] if cv.title else v.title[:60]}")
                     return ("skip", v, None)
+                if cv.stream_kind == "cdn_blocked":
+                    # Coomer/Kemono shard CDN globally unreachable from this
+                    # network. Mark skip (not fail) so we don't build up
+                    # hundreds of permanent-failure entries — will retry on
+                    # next run when the user's routing/VPN changes.
+                    self.log.info(f"  CDN-BLOCKED: {v.site}/{v.video_id} "
+                                  f"(shard CDN unreachable — try a different VPN or wait)")
+                    return ("skip", v, None)
                 self.failed.record_failure(v, "stream extraction failed", 0)
                 self.log.warning(f"  FAIL extract: {v.site}/{v.video_id}: {v.title[:60]}")
                 return ("fail", v, None)

@@ -712,7 +712,12 @@ INDEX_HTML = r"""
         <tr><td>Rate limit</td><td><input id="cfg-rate" type="text" placeholder="e.g. 500K, 2M, blank = unlimited"/></td></tr>
         <tr><td>Cookies file</td><td><input id="cfg-cookies" type="text" placeholder="Path to cookies.txt (Netscape)"/></td></tr>
         <tr><td>Impersonate</td><td><input id="cfg-imp" type="text" placeholder="chrome"/></td></tr>
-        <tr><td>Download proxy</td><td><input id="cfg-proxy" type="text" placeholder="http://host:port, socks5://127.0.0.1:9150 (Tor), blank = none"/></td></tr>
+        <tr><td>Download proxy</td><td>
+          <div style="display:flex; gap:6px; align-items:center;">
+            <input id="cfg-proxy" type="text" placeholder="http://host:port, socks5://127.0.0.1:9055 (Tor), blank = none" style="flex:1;"/>
+            <button class="xs" onclick="enableTor()" data-tip="Auto-start embedded Tor and fill in SOCKS URL">Use Tor</button>
+          </div>
+        </td></tr>
         <tr><td>CamSmut user</td><td><input id="cfg-cs-user" type="text" placeholder="(empty = skip camsmut)"/></td></tr>
         <tr><td>CamSmut password</td><td><input id="cfg-cs-pass" type="password" placeholder=""/></td></tr>
       </table>
@@ -1420,6 +1425,22 @@ async function stopDownload() {
     setTimeout(refreshStatus, 800);
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
+async function enableTor() {
+  toast('Starting Tor... this takes 20-60s on first run', 'info');
+  try {
+    const r = await api('/api/tor', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({action:'start'})});
+    if (r.proxy) {
+      document.getElementById('cfg-proxy').value = r.proxy;
+      _config.download_proxy = r.proxy;
+      toast('Tor running → ' + r.proxy, 'success');
+      loadConfig();
+    } else {
+      toast('Tor start failed: ' + (r.error || 'unknown'), 'error');
+    }
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
 async function runDedup() {
   if (!confirm('Run content-based dedup? Deletes duplicate video files (keeps the most descriptive copy).')) return;
   try {
@@ -1646,6 +1667,57 @@ def api_stop():
         _state["pid"] = None
         _runner_thread = None
     return jsonify({"ok": True})
+
+
+@app.route("/api/tor", methods=["POST"])
+def api_tor():
+    """Start the embedded Tor helper, wait for bootstrap, return the SOCKS
+    URL. Called by the UI when user clicks "Use Tor" in the auth panel —
+    the returned URL is auto-filled into config.download_proxy.
+
+    Also supports action=stop to kill tor.exe and action=status for a
+    cheap ping. Long-running on first --start (20-60 s bootstrap)."""
+    body = request.get_json(silent=True) or {}
+    action = body.get("action", "start")
+    try:
+        if action == "stop":
+            r = subprocess.run(
+                [sys.executable, str(SCRIPT_DIR / "tor_helper.py"), "--stop"],
+                capture_output=True, text=True, timeout=10,
+            )
+            return jsonify({"ok": True, "stopped": True, "stdout": (r.stdout or r.stderr)[-500:]})
+
+        if action == "status":
+            r = subprocess.run(
+                [sys.executable, str(SCRIPT_DIR / "tor_helper.py"), "--status"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0 and r.stdout.strip().startswith("socks5://"):
+                return jsonify({"ok": True, "running": True, "proxy": r.stdout.strip()})
+            return jsonify({"ok": True, "running": False})
+
+        # action == "start"
+        r = subprocess.run(
+            [sys.executable, str(SCRIPT_DIR / "tor_helper.py"), "--start"],
+            capture_output=True, text=True, timeout=180,
+        )
+        proxy = r.stdout.strip()
+        if r.returncode != 0 or not proxy.startswith("socks5://"):
+            return jsonify({
+                "error": "Tor failed to start",
+                "stderr": (r.stderr or r.stdout)[-800:],
+            }), 500
+
+        # Auto-save to config so subsequent runs use it
+        cfg = load_config()
+        cfg["download_proxy"] = proxy
+        save_config(cfg)
+        return jsonify({"ok": True, "proxy": proxy,
+                        "message": f"Tor running at {proxy}; saved to config.download_proxy"})
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Tor bootstrap timed out after 3 minutes"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/dedup", methods=["POST"])

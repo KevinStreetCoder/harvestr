@@ -53,3 +53,6 @@ Thumbs.db
 .mypy_cache/
 .ruff_cache/
 *.log
+
+# Embedded Tor runtime cache (tor_helper.py writes consensus/microdesc here)
+_tor_data/

@@ -1,5 +1,0 @@
-SocksPort 127.0.0.1:9055
-ControlPort 127.0.0.1:9056
-DataDirectory C:\Users\Street Coder\Documents\Scripts\Downloaders\universal\_tor_data
-Log notice stderr
-AvoidDiskWrites 1

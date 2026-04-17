@@ -2,38 +2,30 @@
 """
 Live cam recording integration for Harvestr.
 
-Bridges Harvestr's web UI to the StreaMonitor project
-(https://github.com/lossless1/StreaMonitor or its fork at ./StreaMonitor).
-StreaMonitor has 19 mature site modules (Chaturbate, StripChat, CamSoda,
-Cam4, BongaCams, Flirt4Free, Cherry.tv, Streamate, MyFreeCams, ManyVids,
-FanslyLive, AmateurTV, CamsCom, DreamCam, SexChatHu, XloveCam, ...) that
-each implement a uniform Bot API with a clean Status enum.
+Uses the vendored StreaMonitor backend at live_backend/streamonitor/ for
+18 cam-site modules (Chaturbate, StripChat, CamSoda, Cam4, BongaCams,
+Flirt4Free, Cherry.tv, Streamate, MyFreeCams, ManyVids, FanslyLive,
+AmateurTV, CamsCom, DreamCam, SexChatHu, XloveCam, plus VR variants).
+
+StreaMonitor (https://github.com/lossless1/StreaMonitor) is GPL-3.0;
+see live_backend/LICENSE and live_backend/NOTICE.md.
 
 This module:
-  - Discovers a local StreaMonitor install via env var HARVESTR_STREAMONITOR
-    or the known path C:\\F\\StreaMonitor
-  - Lazily imports Bot, Status, and the 19 site classes
-  - Provides a LiveManager class that the web UI can talk to:
-        add_model, remove_model, start_model, stop_model, list_models,
+  - Adds live_backend/ to sys.path and imports Bot, Status, site classes
+  - Provides a LiveManager class for the web UI:
+        add_model, remove_model, start_model, stop_model,
         get_status_snapshot, get_sites
-  - Persists the model list to downloads/live_models.json (separate from
-    Harvestr's regular config.json — different purpose, different cadence)
-  - Runs each model as a daemon thread (StreaMonitor's built-in pattern)
+  - Persists the model list to downloads/live_models.json (schema
+    matches StreaMonitor's own config.json)
+  - Runs each model as a daemon thread via StreaMonitor's Bot.restart()
 
 Design notes:
-  - We do NOT re-implement the 19 site extractors. They're 200-500 lines
-    each of carefully-tuned reverse-engineering. Instead we import them.
-  - If StreaMonitor isn't available, this module exposes available=False
-    and the UI shows a friendly "install StreaMonitor to enable live"
-    banner instead of crashing.
+  - The 19 site extractors (200-500 lines each of careful reverse-
+    engineering) are NOT re-implemented — vendored verbatim.
+  - If HARVESTR_STREAMONITOR env var is set, that path wins over the
+    vendored copy (lets you test with a development checkout).
   - Recording output goes to <downloads>/<performer> [SITE]/N.mkv,
-    matching StreaMonitor's layout exactly so StreaMonitor's own tools
-    (untrunc, move, etc.) keep working.
-  - Config file is a flat JSON array of
-        {"username": "alice", "site": "Chaturbate", "running": true,
-         "room_id": "12345" (optional)}
-    objects. Identical schema to StreaMonitor's config.json so you can
-    copy yours over.
+    matching StreaMonitor's layout exactly.
 """
 from __future__ import annotations
 
@@ -50,15 +42,20 @@ from typing import Any, Dict, List, Optional, Tuple
 log = logging.getLogger("harvestr.live")
 
 # ── Discovery ────────────────────────────────────────────────────────────────
+# Preference order:
+#   1. HARVESTR_STREAMONITOR env var (dev override)
+#   2. Vendored copy under live_backend/ (default — ships with Harvestr)
+#   3. Common external install paths (fallback for users who cloned it manually)
+_HERE = Path(__file__).resolve().parent
+_VENDORED = _HERE / "live_backend"
 
-# Default candidate paths (Windows-centric since the project is Windows-first).
 _CANDIDATES = [
     os.environ.get("HARVESTR_STREAMONITOR", ""),
-    r"C:\F\StreaMonitor",
+    str(_VENDORED),                    # vendored (the common case)
+    r"C:\F\StreaMonitor",              # external install on Windows
     r"D:\F\StreaMonitor",
     str(Path.home() / "StreaMonitor"),
     str(Path.home() / "Documents" / "StreaMonitor"),
-    str(Path(__file__).resolve().parent / "StreaMonitor"),
 ]
 
 _STREAMONITOR_PATH: Optional[str] = None

@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''streamonitor/bot.py'', doraise=True\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''streamonitor/bot.py'', doraise=True\\); print\\(''OK''\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''streamonitor/log.py'', doraise=True\\); print\\(''OK''\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''streamonitor/bot.py'', doraise=True\\); py_compile.compile\\(''streamonitor/sites/camsoda.py'', doraise=True\\); print\\(''OK''\\)\")",
+      "Bash(python -c \"from pathlib import Path; print\\(Path\\(''1.tmp.ts''\\).suffix\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(r''C:\\\\Users\\\\Street Coder\\\\Documents\\\\Scripts\\\\watermarktest.py'', doraise=True\\); print\\(''OK''\\)\")",
+      "Bash(tasklist /fi \"imagename eq python.exe\")",
+      "Bash(cmd.exe /c \"tasklist /fi \"\"imagename eq python.exe\"\"\")",
+      "Bash(cmd.exe /c \"tasklist\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(r''D:\\\\F\\\\StreaMonitor\\\\streamonitor\\\\bot.py'', doraise=True\\); print\\(''OK''\\)\")",
+      "Bash(python -c \":*)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''streamonitor/bot.py'', doraise=True\\); py_compile.compile\\(''streamonitor/sites/streamate.py'', doraise=True\\); print\\(''All clean, ready to start''\\)\")",
+      "Bash(powershell -Command \"Get-Process python* | Select-Object Id, StartTime, CommandLine | Format-List\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(r''D:\\\\F\\\\StreaMonitor\\\\streamonitor\\\\sites\\\\streamate.py'', doraise=True\\); print\\(''OK''\\)\")",
+      "Bash(cmd.exe /c \"taskkill /f /im ffmpeg.exe\")",
+      "Bash(cmd.exe /c \"taskkill /f /im ffmpeg.exe /t\")",
+      "Bash(powershell -Command \"Get-Process ffmpeg -ErrorAction SilentlyContinue | Stop-Process -Force; \\(Get-Process ffmpeg -ErrorAction SilentlyContinue\\).Count\")",
+      "Bash(powershell -Command \"Get-Process ffmpeg -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.Id -Force }; Start-Sleep -Seconds 2; \\(Get-Process ffmpeg -ErrorAction SilentlyContinue\\).Count\")",
+      "Bash(powershell -Command \"Get-Process ffmpeg -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep -Seconds 2; \\(Get-Process ffmpeg -ErrorAction SilentlyContinue\\).Count\")",
+      "Bash(robocopy \"D:\\\\F\\\\StreaMonitor\" \"C:\\\\F\\\\StreaMonitor\" /E /XD \"D:\\\\F\\\\StreaMonitor\\\\streamonitor\\\\recordings\" /NFL /NDL /NJH /NJS /NC /NS)",
+      "Bash(cmd.exe /c \"robocopy D:\\\\F\\\\StreaMonitor C:\\\\F\\\\StreaMonitor /E /XD D:\\\\F\\\\StreaMonitor\\\\streamonitor\\\\recordings\")",
+      "Bash(cmd.exe /c \"dir C:\\\\F\\\\StreaMonitor /b\")",
+      "Bash(powershell -Command \"robocopy ''D:\\\\F\\\\StreaMonitor'' ''C:\\\\F\\\\StreaMonitor'' /E /XD ''D:\\\\F\\\\StreaMonitor\\\\streamonitor\\\\recordings''; Write-Host ''EXIT CODE:'' $LASTEXITCODE\")"
+    ]
+  }
+}

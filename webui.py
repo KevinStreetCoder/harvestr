@@ -1097,18 +1097,13 @@ INDEX_HTML = r"""
   <div id="live-unavailable" class="card" style="display:none;">
     <h2>
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-      Live recording unavailable
+      Live recording failed to start
     </h2>
     <p class="muted" style="font-size:13px;">
-      The live-recording feature needs <b>StreaMonitor</b> — a mature open-source
-      cam-recording backend with 18+ site modules (Chaturbate, StripChat, CamSoda,
-      Cam4, BongaCams, Flirt4Free, Cherry.tv, Streamate, MyFreeCams, ManyVids,
-      FanslyLive, AmateurTV, etc.).
-    </p>
-    <p class="muted" style="font-size:13px;">
-      To enable: clone StreaMonitor to <code>C:\F\StreaMonitor</code> (or set the
-      <code>HARVESTR_STREAMONITOR</code> env var to a custom path) and restart
-      <code>webui.py</code>.
+      The vendored Live backend (<code>live_backend/streamonitor/</code>) failed
+      to import. This is unusual — run
+      <code>python -c "from live_recording import available; print(available)"</code>
+      to see the error, or check <code>downloads/universal.log</code>.
     </p>
     <p id="live-error" class="muted" style="font-size:12px; color: var(--bad);"></p>
   </div>

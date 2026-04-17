@@ -59,7 +59,7 @@ Given a username, fan out across 50+ sites to **find every video this person has
 ever posted** and download the ones you don't already have. See the [Archive
 section](#archive-mode) below.
 
-### 🔴 Live mode (new — backed by [StreaMonitor](https://github.com/lossless1/StreaMonitor))
+### 🔴 Live mode (backed by vendored [StreaMonitor](https://github.com/lossless1/StreaMonitor))
 
 Track cam models across **18 platforms** and auto-record the moment they go
 live. Harvestr keeps a lightweight bot per model that polls the site every
@@ -75,9 +75,17 @@ handed to ffmpeg and written to disk. Supported sites out-of-the-box:
 | CamsCom | DreamCam / DreamCam VR | SexChatHU |
 | XLoveCam | | |
 
-**Setup:** clone StreaMonitor to `C:\F\StreaMonitor` (or set `HARVESTR_STREAMONITOR=<path>`
-env var). Harvestr auto-detects it; the Live tab lights up. Otherwise, the
-Live tab shows a friendly "install StreaMonitor to enable" banner.
+**Zero-setup** — StreaMonitor is vendored into `live_backend/streamonitor/`
+and ships with Harvestr. Clone Harvestr, install `requirements.txt`, and the
+Live tab lights up. No second repo to clone, no env var to set.
+
+> GPL-3.0 notice: the vendored StreaMonitor code retains its original
+> GPL-3.0 license (see `live_backend/LICENSE` and `live_backend/NOTICE.md`).
+> Combined distributions of Harvestr + live_backend/ must comply with GPL-3.0.
+> Harvestr's own code outside `live_backend/` remains MIT.
+
+To point at a development checkout of StreaMonitor instead of the vendored
+copy, set `HARVESTR_STREAMONITOR=<path>` before launching `webui.py`.
 
 **UI features:**
 - Per-model cards with animated state dots (green pulse = recording, blue = connecting, purple = private, yellow = offline, red = problem)

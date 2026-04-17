@@ -283,6 +283,28 @@ class LiveManager:
             })
         return out
 
+    def bulk_add(self, entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Add many models at once. `entries` is a list of dicts with
+        {username, site, room_id?} — same schema as StreaMonitor's config.json.
+        Duplicates are silently skipped. Returns counts."""
+        added = 0
+        errors: List[str] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            u = (entry.get("username") or "").strip()
+            s = (entry.get("site") or "").strip()
+            rid = entry.get("room_id")
+            if not u or not s:
+                continue
+            try:
+                self.add_model(u, s, room_id=rid)
+                added += 1
+            except Exception as e:
+                errors.append(f"{u}|{s}: {e}")
+        return {"ok": True, "added": added, "errors": errors,
+                "total": len(self._models)}
+
     def add_model(self, username: str, site: str,
                   room_id: Optional[str] = None) -> Dict[str, Any]:
         username = (username or "").strip()

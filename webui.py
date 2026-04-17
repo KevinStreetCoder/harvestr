@@ -626,6 +626,35 @@ INDEX_HTML = r"""
   *::-webkit-scrollbar-thumb:hover { background: #4d5570;
                                       border: 2px solid transparent; background-clip: padding-box; }
 
+  /* Bulk-add modal */
+  .modal-card.bulkadd {
+    width: min(640px, 94vw); padding: 0; overflow: hidden;
+    background: var(--bg-2); border: 1px solid var(--border-2);
+    box-shadow: 0 24px 60px #00000080;
+  }
+  .bulkadd-head {
+    padding: 18px 20px 12px; display: flex; align-items: flex-start; gap: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .bulkadd-head h3 { margin: 0; font-size: 16px; font-weight: 700; }
+  .bulkadd-head p { margin: 4px 0 0; font-size: 12.5px; }
+  .modal-card.bulkadd textarea {
+    width: 100%; min-height: 220px; resize: vertical;
+    background: var(--bg); color: var(--text); border: none; outline: none;
+    padding: 14px 20px; font: 13px "JetBrains Mono", Consolas, monospace;
+    border-bottom: 1px solid var(--border); border-radius: 0;
+  }
+  .bulkadd-actions {
+    padding: 12px 20px; display: flex; align-items: center; gap: 8px;
+  }
+  .file-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 14px; background: var(--bg-3); color: var(--text);
+    border: 1px solid var(--border-2); border-radius: 7px; cursor: pointer;
+    font-size: 13px; font-weight: 500; transition: all .15s;
+  }
+  .file-btn:hover { background: #2a3248; border-color: #3d4662; }
+
   /* Skeleton loaders */
   .skel {
     background: linear-gradient(90deg, var(--bg-3) 25%, #252a38 50%, var(--bg-3) 75%);
@@ -946,8 +975,14 @@ INDEX_HTML = r"""
       </h2>
       <div class="flex mb">
         <input id="new-perf" type="text" placeholder="username (e.g. blondie_254)"
+               aria-label="Performer username"
                onkeydown="if(event.key==='Enter'){addPerformer();}" />
         <button class="primary" onclick="addPerformer()">+ Add</button>
+        <button class="ghost" onclick="openBulkAdd()" data-tip="Paste a list or import a JSON config"
+                aria-label="Bulk add / Import">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+          Bulk
+        </button>
       </div>
       <div class="perf-list" id="perf-list"></div>
       <div class="flex" style="margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px;">
@@ -1179,6 +1214,11 @@ INDEX_HTML = r"""
                style="flex: 0 0 180px; display: none;"
                aria-label="Room ID"/>
         <button class="primary" onclick="liveAdd()">+ Track</button>
+        <button class="ghost" onclick="openLiveBulkAdd()" data-tip="Paste list or import JSON"
+                aria-label="Bulk add live models">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+          Bulk
+        </button>
       </div>
       <p class="muted" style="margin-top: 8px; font-size: 12px;" id="live-site-hint"></p>
     </div>
@@ -1224,6 +1264,33 @@ INDEX_HTML = r"""
     <div id="palette-list" role="listbox"></div>
     <div class="palette-footer muted">
       <span>↑↓ navigate</span> · <span>↵ run</span> · <span>Esc close</span>
+    </div>
+  </div>
+</div>
+
+<!-- Bulk add / import modal (shared between Archive + Live) -->
+<div class="modal-backdrop" id="bulkadd-modal" onclick="closeBulkAdd(event)" role="dialog" aria-modal="true" aria-labelledby="bulkadd-title">
+  <div class="modal-card bulkadd" onclick="event.stopPropagation()">
+    <div class="bulkadd-head">
+      <div>
+        <h3 id="bulkadd-title">Bulk add</h3>
+        <p class="muted" id="bulkadd-sub">Paste one username per line, or upload a JSON config.</p>
+      </div>
+      <button class="xs ghost" onclick="closeBulkAdd()" aria-label="Close">✕</button>
+    </div>
+    <textarea id="bulkadd-text" rows="10"
+              placeholder="alice_example&#10;bob_example&#10;# lines starting with # are comments"
+              aria-label="Bulk list"></textarea>
+    <div class="bulkadd-actions">
+      <label class="file-btn">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+        Upload JSON
+        <input type="file" accept=".json,application/json"
+               onchange="bulkaddLoadFile(event)" hidden/>
+      </label>
+      <div style="flex:1"></div>
+      <button class="ghost" onclick="closeBulkAdd()">Cancel</button>
+      <button class="primary" onclick="bulkaddSubmit()">Add all</button>
     </div>
   </div>
 </div>
@@ -2214,6 +2281,113 @@ async function diskPruneToFree() {
   } catch(e) { toast('Error: '+e.message, 'error'); }
 }
 
+// ── Bulk add / import modal (shared Archive + Live) ─────────────────────
+let _bulkaddMode = 'archive';   // 'archive' | 'live'
+
+function openBulkAdd() {
+  _bulkaddMode = 'archive';
+  document.getElementById('bulkadd-title').textContent = 'Bulk add performers';
+  document.getElementById('bulkadd-sub').innerHTML =
+    'One username per line.<br>' +
+    'Or upload a <code>config.json</code> export — we merge <code>performers</code> + enabled sites.';
+  document.getElementById('bulkadd-text').placeholder =
+    'alice_example\nbob_example\n# lines starting with # are comments';
+  document.getElementById('bulkadd-modal').classList.add('show');
+  setTimeout(() => document.getElementById('bulkadd-text').focus(), 30);
+}
+
+function openLiveBulkAdd() {
+  _bulkaddMode = 'live';
+  document.getElementById('bulkadd-title').textContent = 'Bulk add live models';
+  document.getElementById('bulkadd-sub').innerHTML =
+    'One per line: <code>username Site [room_id]</code><br>' +
+    'Or upload a JSON array like <code>[{"username":"alice","site":"Chaturbate"}]</code> — same schema as StreaMonitor\'s config.json.';
+  document.getElementById('bulkadd-text').placeholder =
+    'alice Chaturbate\nbob StripChat 12345\n# username site [room_id]';
+  document.getElementById('bulkadd-modal').classList.add('show');
+  setTimeout(() => document.getElementById('bulkadd-text').focus(), 30);
+}
+
+function closeBulkAdd(e) {
+  if (e && e.target && e.target.id !== 'bulkadd-modal') return;
+  document.getElementById('bulkadd-modal').classList.remove('show');
+  document.getElementById('bulkadd-text').value = '';
+}
+
+function bulkaddLoadFile(e) {
+  const f = e.target.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    const text = ev.target.result;
+    try {
+      const parsed = JSON.parse(text);
+      // If it's the full config with performers[], pretty-fill
+      if (parsed && typeof parsed === 'object') {
+        if (_bulkaddMode === 'archive') {
+          const perfs = Array.isArray(parsed.performers) ? parsed.performers
+                         : Array.isArray(parsed) ? parsed : [];
+          document.getElementById('bulkadd-text').value = perfs.join('\n');
+          // Stash the full parsed object for submit to use (merge mode)
+          window._bulkaddImportedConfig = parsed.performers ? parsed : null;
+        } else {
+          const entries = Array.isArray(parsed) ? parsed
+                         : Array.isArray(parsed.models) ? parsed.models : [];
+          // Render as textarea-editable lines
+          document.getElementById('bulkadd-text').value =
+            entries.map(e => `${e.username||''} ${e.site||''}${e.room_id ? ' '+e.room_id : ''}`).join('\n');
+          window._bulkaddImportedEntries = entries;
+        }
+        toast(`Loaded ${f.name}`, 'success');
+      }
+    } catch (err) {
+      // Not JSON — treat as plaintext
+      document.getElementById('bulkadd-text').value = text;
+      toast(`Loaded ${f.name} (plaintext)`);
+    }
+  };
+  reader.readAsText(f);
+}
+
+async function bulkaddSubmit() {
+  const text = document.getElementById('bulkadd-text').value.trim();
+  if (!text) { toast('Nothing to add', 'error'); return; }
+  try {
+    if (_bulkaddMode === 'archive') {
+      // If we loaded a full config object, use the /import endpoint for
+      // merge semantics. Otherwise just bulk-add the names.
+      if (window._bulkaddImportedConfig) {
+        const r = await api('/api/config/import', {method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({config: window._bulkaddImportedConfig})});
+        toast(`Imported config: +${r.performers_added} performers, updated ${r.fields_updated.length} fields`, 'success');
+        window._bulkaddImportedConfig = null;
+      } else {
+        const r = await api('/api/config/performer/bulk_add', {method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({text})});
+        toast(`Added ${r.added.length} performers (total ${r.total})`, 'success');
+      }
+      loadConfig();
+    } else {
+      // Live: prefer explicit entries if a JSON file was loaded
+      const body = (window._bulkaddImportedEntries && window._bulkaddImportedEntries.length)
+        ? {entries: window._bulkaddImportedEntries}
+        : {text};
+      const r = await api('/api/live/bulk_add', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(body)});
+      let msg = `Added ${r.added} live models (total ${r.total})`;
+      if (r.errors && r.errors.length) msg += ` · ${r.errors.length} errors`;
+      toast(msg, r.errors && r.errors.length ? 'info' : 'success');
+      if (r.errors && r.errors.length) console.warn('bulk-add errors:', r.errors);
+      window._bulkaddImportedEntries = null;
+      liveRefresh();
+    }
+    closeBulkAdd();
+  } catch (e) { toast('Error: ' + e.message, 'error'); }
+}
+
 // ── Command palette (Ctrl+K) ─────────────────────────────────────────────
 const _paletteCmds = [
   {label:'Refresh everything',  kbd:'F5',     run:() => refreshAll()},
@@ -2226,7 +2400,10 @@ const _paletteCmds = [
   {label:'Open Archive tab',    kbd:'1',      run:() => switchTab('archive')},
   {label:'Open Live tab',       kbd:'2',      run:() => switchTab('live')},
   {label:'Focus add-performer',  kbd:'',      run:() => {switchTab('archive'); document.getElementById('new-perf').focus();}},
+  {label:'Bulk add performers…', kbd:'',      run:() => {switchTab('archive'); openBulkAdd();}},
   {label:'Focus add-live-model', kbd:'',      run:() => {switchTab('live'); document.getElementById('live-new-username').focus();}},
+  {label:'Bulk add live models…',kbd:'',      run:() => {switchTab('live'); openLiveBulkAdd();}},
+  {label:'Import JSON config…',  kbd:'',      run:() => {switchTab('archive'); openBulkAdd();}},
   {label:'Start all live models', kbd:'',     run:() => liveToggleAll(true)},
   {label:'Stop all live models',  kbd:'',     run:() => liveToggleAll(false)},
   {label:'Enable Tor',           kbd:'',      run:() => enableTor()},
@@ -2281,6 +2458,12 @@ function paletteRun(idx) {
 document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
     e.preventDefault(); openPalette();
+  } else if (e.key === 'Escape') {
+    // Close whichever modal is open
+    ['palette-modal','bulkadd-modal','preview-modal'].forEach(id => {
+      const m = document.getElementById(id);
+      if (m && m.classList.contains('show')) m.classList.remove('show');
+    });
   } else if (!e.ctrlKey && !e.metaKey && !e.altKey
              && document.activeElement && document.activeElement.tagName !== 'INPUT'
              && document.activeElement.tagName !== 'TEXTAREA') {
@@ -2430,6 +2613,78 @@ def api_remove_performer():
     cfg["performers"] = [p for p in perfs if p != name]
     save_config(cfg)
     return jsonify({"ok": True, "performers": cfg["performers"]})
+
+
+@app.route("/api/config/performer/bulk_add", methods=["POST"])
+def api_bulk_add_performers():
+    """Add many performers at once. Accepts:
+       - names: ["alice", "bob", ...]     (explicit list)
+       - text: "alice\nbob\ncharlie"      (whitespace/comma separated)
+    Duplicates (case-insensitive) are silently skipped."""
+    body = request.get_json(force=True) or {}
+    names: list[str] = []
+    if isinstance(body.get("names"), list):
+        names = [str(n).strip() for n in body["names"]]
+    if body.get("text"):
+        for chunk in str(body["text"]).replace(",", "\n").splitlines():
+            names.append(chunk.strip())
+    # Clean + dedup
+    cfg = load_config()
+    existing = {p.lower() for p in (cfg.get("performers") or [])}
+    added = []
+    for n in names:
+        if not n or n.startswith("#"):
+            continue
+        if n.lower() in existing:
+            continue
+        existing.add(n.lower())
+        cfg.setdefault("performers", []).append(n)
+        added.append(n)
+    if added:
+        save_config(cfg)
+    return jsonify({"ok": True, "added": added, "total": len(cfg.get("performers", []))})
+
+
+@app.route("/api/config/import", methods=["POST"])
+def api_config_import():
+    """Merge a JSON config blob into the current config.json.
+
+    Accepts the same schema as config.json itself, OR a simpler shape:
+      {"performers": ["a", "b"], "enabled_sites": [...], "max_videos_per_site": 100}
+    Overrides top-level scalars; unions list fields (performers + enabled_sites).
+    """
+    body = request.get_json(force=True) or {}
+    data = body.get("config") or body
+    if not isinstance(data, dict):
+        return jsonify({"error": "config must be a JSON object"}), 400
+    cfg = load_config()
+    merged_changes = {"performers_added": 0, "fields_updated": []}
+
+    # Union-merge list fields
+    for field in ("performers", "enabled_sites"):
+        if field in data and isinstance(data[field], list):
+            current = list(cfg.get(field) or [])
+            existing = {p.lower() if isinstance(p, str) else p for p in current}
+            for n in data[field]:
+                if isinstance(n, str):
+                    if n.strip() and n.strip().lower() not in existing:
+                        existing.add(n.strip().lower())
+                        current.append(n.strip())
+                        if field == "performers":
+                            merged_changes["performers_added"] += 1
+            cfg[field] = current
+
+    # Scalar overrides
+    for k, v in data.items():
+        if k in ("performers", "enabled_sites"):
+            continue
+        if k in cfg or isinstance(v, (str, int, float, bool)):
+            cfg[k] = v
+            merged_changes["fields_updated"].append(k)
+
+    save_config(cfg)
+    return jsonify({"ok": True, **merged_changes,
+                    "total_performers": len(cfg.get("performers", []))})
 
 
 @app.route("/api/sites")
@@ -2611,6 +2866,42 @@ def api_live_status():
     if not _live:
         return jsonify({"available": False, "models": [], "summary": {}})
     return jsonify(_live.get_snapshot())
+
+
+@app.route("/api/live/bulk_add", methods=["POST"])
+def api_live_bulk_add():
+    """Bulk-add live models. Accepts:
+      - entries: [{username, site, room_id?}, ...]
+      - text: "alice Chaturbate\nbob StripChat 12345\n# comments ok"
+             (whitespace-separated: username, site, optional room_id)
+    Unknown sites skipped with an error, dupes skipped silently."""
+    if not _live:
+        return jsonify({"error": "live recording unavailable"}), 503
+    body = request.get_json(force=True) or {}
+    entries: list[dict] = []
+    # Explicit list
+    if isinstance(body.get("entries"), list):
+        entries.extend(body["entries"])
+    # Free-text paste
+    if body.get("text"):
+        available_sites = {s["name"].lower(): s["name"] for s in (_live.list_sites() or [])}
+        for line in str(body["text"]).splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            user = parts[0]
+            site_raw = parts[1]
+            # Case-insensitive site match
+            site = available_sites.get(site_raw.lower(), site_raw)
+            room_id = parts[2] if len(parts) >= 3 else None
+            entries.append({"username": user, "site": site, "room_id": room_id})
+    try:
+        return jsonify(_live.bulk_add(entries))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
 
 @app.route("/api/live/add", methods=["POST"])

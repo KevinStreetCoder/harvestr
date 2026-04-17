@@ -406,6 +406,36 @@ times out.
 
 ---
 
+## Bulk add / JSON import
+
+Both the Archive and Live tabs have a **Bulk** button next to the `+ Add`
+form. It opens a dialog with a textarea + JSON-upload button.
+
+### Archive (performers)
+Paste one username per line (or comma-separated). Lines starting with `#`
+are treated as comments. Uploading a JSON file merges:
+- `performers[]` (union, case-insensitive dedup)
+- `enabled_sites[]`
+- scalar settings like `max_videos_per_site`, `max_parallel_downloads`, etc.
+
+Same schema as `config.example.json` — you can drop in another Harvestr
+install's config.
+
+### Live (cam models)
+Paste one model per line. Format: `username Site [room_id]`.
+```
+alice_model Chaturbate
+bob_model   StripChat   987654     # with room id
+charlie_m   Cam4
+```
+Uploading a JSON file accepts the same schema as StreaMonitor's
+`config.json`: an array of `{"username","site","room_id?"}` objects.
+
+### Programmatic
+- `POST /api/config/performer/bulk_add` — `{"text": "..."}` or `{"names": [...]}`
+- `POST /api/config/import` — merge any config JSON
+- `POST /api/live/bulk_add` — `{"text": "..."}` or `{"entries": [...]}`
+
 ## Troubleshooting
 
 ### "I'm only getting hits from Coomer, and they all fail"

@@ -46,6 +46,15 @@ LOG_PATH = DOWNLOADS_DIR / "universal.log"
 
 app = Flask(__name__)
 
+# ── Live recording manager (lazy — imports StreaMonitor if available) ────────
+try:
+    from live_recording import LiveManager as _LiveManager, available as _live_available
+    _live = _LiveManager(downloads_dir=DOWNLOADS_DIR)
+except Exception as _le:
+    _live = None
+    _live_available = False
+
+
 # ── State shared with background task ────────────────────────────────────────
 _state = {
     "running": False,
@@ -602,6 +611,129 @@ INDEX_HTML = r"""
   }
   .filter-row .chip:hover { border-color: var(--accent); color: var(--accent); }
   .filter-row .chip.active { background: var(--accent-2); color: white; border-color: var(--accent); }
+
+  /* Tab bar (top navigation) */
+  .tab-bar { display: flex; gap: 2px; background: var(--bg); padding: 3px;
+             border-radius: 9px; border: 1px solid var(--border); margin: 0 8px; }
+  .tab-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 14px; background: transparent; border: 1px solid transparent;
+    color: var(--text-2); cursor: pointer; font-size: 13px; font-weight: 500;
+    border-radius: 6px; transition: all .15s; position: relative;
+  }
+  .tab-btn .icon { width: 14px; height: 14px; }
+  .tab-btn:hover { background: var(--bg-3); color: var(--text); }
+  .tab-btn.active { background: var(--bg-3); color: var(--accent);
+                    border-color: var(--border-2); font-weight: 600; }
+  .tab-btn .tab-badge {
+    padding: 1px 7px; border-radius: 10px; font-size: 11px;
+    background: var(--good); color: #06121a; font-weight: 700; line-height: 1.2;
+    margin-left: 2px;
+  }
+
+  /* Pages */
+  .page { display: block; }
+  .page[hidden] { display: none !important; }
+
+  /* Live model grid */
+  .live-grid {
+    display: grid; gap: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  }
+  .live-card {
+    background: linear-gradient(180deg, var(--bg-2), #10141c);
+    border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px 16px; transition: border-color .15s, transform .15s;
+    position: relative; overflow: hidden;
+  }
+  .live-card:hover { border-color: var(--border-2); transform: translateY(-1px); }
+  .live-card.recording {
+    border-color: var(--good);
+    box-shadow: 0 0 0 1px var(--good), 0 0 12px #4ade8030;
+  }
+  .live-card.recording::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--good), transparent);
+    animation: scan 2s linear infinite;
+  }
+  @keyframes scan {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+  }
+  .live-card .top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+  .live-card .username { font-weight: 700; font-size: 15px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .live-card .site-chip { font-size: 10.5px; padding: 1px 6px; border-radius: 4px;
+                          background: var(--bg-3); color: var(--text-2); font-family: "JetBrains Mono", monospace; }
+  .live-card .status-row {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+    font-size: 12px;
+  }
+  .live-card .state-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  }
+  .live-card .state-dot.good     { background: var(--good);  box-shadow: 0 0 6px #4ade80; animation: pulse-dot 1.5s ease-in-out infinite; }
+  .live-card .state-dot.accent   { background: var(--accent); box-shadow: 0 0 6px #5cb8ff; }
+  .live-card .state-dot.purple   { background: var(--purple); box-shadow: 0 0 6px #a78bfa; }
+  .live-card .state-dot.warn     { background: var(--warn);   box-shadow: 0 0 6px #fbbf2450; }
+  .live-card .state-dot.bad      { background: var(--bad);    box-shadow: 0 0 6px #f87171; }
+  .live-card .state-dot.text-3   { background: #3a4253; }
+  @keyframes pulse-dot { 0%,100%{opacity:1;} 50%{opacity:.45;} }
+  .live-card .state-label { font-weight: 500; }
+  .live-card .state-label.good { color: var(--good); }
+  .live-card .state-label.accent { color: var(--accent); }
+  .live-card .state-label.purple { color: var(--purple); }
+  .live-card .state-label.warn { color: var(--warn); }
+  .live-card .state-label.bad { color: var(--bad); }
+  .live-card .state-label.text-3 { color: var(--text-3); }
+  .live-card .meta { font-size: 11.5px; color: var(--text-3); font-family: "JetBrains Mono", monospace; }
+  .live-card .actions { display: flex; gap: 6px; margin-top: 12px; }
+  .live-card .actions button { flex: 1; }
+
+  /* Stat-box accent variant */
+  .stat-box.accent::before { background: var(--accent); }
+  .stat-box.accent .value { color: var(--accent); }
+
+  /* Command palette */
+  .modal-card.palette {
+    width: min(560px, 90vw); padding: 0; overflow: hidden;
+    background: var(--bg-2); border: 1px solid var(--border-2);
+    box-shadow: 0 20px 60px #00000080;
+  }
+  .modal-card.palette input {
+    border: none; background: transparent; color: var(--text);
+    padding: 16px 18px; font-size: 14px; width: 100%;
+    border-bottom: 1px solid var(--border);
+  }
+  .modal-card.palette input:focus { outline: none; box-shadow: none; border-bottom-color: var(--accent); }
+  #palette-list { max-height: 340px; overflow-y: auto; padding: 4px; }
+  #palette-list .pcmd {
+    padding: 9px 12px; border-radius: 6px; cursor: pointer;
+    display: flex; align-items: center; gap: 10px; font-size: 13px;
+    color: var(--text);
+  }
+  #palette-list .pcmd:hover,
+  #palette-list .pcmd.selected { background: var(--bg-3); }
+  #palette-list .pcmd .kbd {
+    margin-left: auto; font-size: 11px; color: var(--text-3);
+    padding: 1px 6px; border: 1px solid var(--border-2); border-radius: 3px;
+    font-family: "JetBrains Mono", monospace;
+  }
+  #palette-list .pcmd .desc { color: var(--text-3); font-size: 11.5px; margin-left: 4px; }
+  .palette-footer {
+    padding: 8px 14px; font-size: 11.5px; border-top: 1px solid var(--border);
+    display: flex; gap: 14px;
+  }
+
+  /* Sort chips */
+  .chip[data-sort] { background: var(--bg); }
+  .chip[data-sort].active { background: var(--accent-2); color: white; border-color: var(--accent); }
+
+  /* Empty state */
+  .empty-state {
+    text-align: center; padding: 48px 24px; color: var(--text-3);
+    border: 2px dashed var(--border); border-radius: 12px; font-size: 13.5px;
+  }
+  .empty-state .big-icon { width: 48px; height: 48px; margin-bottom: 12px; color: var(--border-2); }
 </style>
 </head>
 <body>
@@ -629,19 +761,49 @@ INDEX_HTML = r"""
     </div>
   </div>
 
-  <span class="status-pill">
+  <nav class="tab-bar" role="tablist" aria-label="Main sections">
+    <button class="tab-btn active" role="tab" data-page="archive"
+            aria-selected="true" aria-controls="page-archive"
+            onclick="switchTab('archive')">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+      Archive
+    </button>
+    <button class="tab-btn" role="tab" data-page="live"
+            aria-selected="false" aria-controls="page-live"
+            onclick="switchTab('live')">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9" opacity=".35"/><circle cx="12" cy="12" r="6" opacity=".55"/></svg>
+      Live
+      <span id="tab-live-badge" class="tab-badge" hidden>0</span>
+    </button>
+  </nav>
+
+  <span class="status-pill" role="status" aria-live="polite">
     <span class="status-dot" id="status-dot"></span>
     <span id="status-text">idle</span>
   </span>
 
   <div style="flex:1"></div>
 
-  <button class="primary" id="start-btn" onclick="startDownload()"
-          data-tip="Run every performer in config">▶&nbsp; Start all</button>
-  <button class="danger" id="stop-btn" onclick="stopDownload()" disabled
-          data-tip="Kill the running subprocess">■&nbsp; Stop</button>
-  <button onclick="runDedup()" data-tip="Scan + delete duplicate files">⌥&nbsp; Dedup</button>
-  <button class="ghost" onclick="refreshAll()" data-tip="Reload config / sites / history">↻</button>
+  <button class="ghost" data-tip="Command palette (Ctrl+K)"
+          onclick="openPalette()" aria-label="Open command palette">
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    <span style="opacity:.7; font-size:11px; padding:0 4px; border:1px solid var(--border-2); border-radius:3px;">⌘K</span>
+  </button>
+
+  <div id="archive-controls" style="display:flex; gap:8px;">
+    <button class="primary" id="start-btn" onclick="startDownload()"
+            data-tip="Run every performer in config">▶&nbsp; Start all</button>
+    <button class="danger" id="stop-btn" onclick="stopDownload()" disabled
+            data-tip="Kill the running subprocess">■&nbsp; Stop</button>
+    <button onclick="runDedup()" data-tip="Scan + delete duplicate files">⌥&nbsp; Dedup</button>
+    <button class="ghost" onclick="refreshAll()" aria-label="Refresh"
+            data-tip="Reload config / sites / history">↻</button>
+  </div>
+  <div id="live-controls" style="display:none; gap:8px;">
+    <button class="success" onclick="liveToggleAll(true)" data-tip="Start polling every model">▶ Start all live</button>
+    <button class="danger" onclick="liveToggleAll(false)" data-tip="Stop polling every model">■ Stop all</button>
+    <button class="ghost" onclick="liveRefresh()" aria-label="Refresh">↻</button>
+  </div>
 </header>
 
 <div id="toast" class="toast"></div>
@@ -657,6 +819,8 @@ INDEX_HTML = r"""
 </div>
 
 <div class="container">
+
+<section id="page-archive" class="page" role="tabpanel" aria-labelledby="tab-archive">
 
   <!-- Header stats strip -->
   <div class="stats">
@@ -824,6 +988,102 @@ INDEX_HTML = r"""
       </div>
     </div>
 
+  </div>
+</section><!-- /page-archive -->
+
+<section id="page-live" class="page" role="tabpanel" aria-labelledby="tab-live" hidden>
+  <div id="live-unavailable" class="card" style="display:none;">
+    <h2>
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      Live recording unavailable
+    </h2>
+    <p class="muted" style="font-size:13px;">
+      The live-recording feature needs <b>StreaMonitor</b> — a mature open-source
+      cam-recording backend with 18+ site modules (Chaturbate, StripChat, CamSoda,
+      Cam4, BongaCams, Flirt4Free, Cherry.tv, Streamate, MyFreeCams, ManyVids,
+      FanslyLive, AmateurTV, etc.).
+    </p>
+    <p class="muted" style="font-size:13px;">
+      To enable: clone StreaMonitor to <code>C:\F\StreaMonitor</code> (or set the
+      <code>HARVESTR_STREAMONITOR</code> env var to a custom path) and restart
+      <code>webui.py</code>.
+    </p>
+    <p id="live-error" class="muted" style="font-size:12px; color: var(--bad);"></p>
+  </div>
+
+  <div id="live-available">
+    <!-- Live stats strip -->
+    <div class="stats">
+      <div class="stat-box"><div class="value" id="live-stat-total">–</div><div class="label">Models tracked</div></div>
+      <div class="stat-box accent"><div class="value" id="live-stat-running">–</div><div class="label">Polling</div></div>
+      <div class="stat-box good"><div class="value" id="live-stat-recording">–</div><div class="label">Recording now</div></div>
+      <div class="stat-box warn"><div class="value" id="live-stat-size">–</div><div class="label">Recorded size</div></div>
+    </div>
+
+    <!-- Add model + site picker -->
+    <div class="card">
+      <h2>
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+        Track a model
+      </h2>
+      <div class="flex" style="flex-wrap: wrap; gap: 10px;">
+        <input id="live-new-username" type="text" placeholder="Model username"
+               style="flex: 1; min-width: 200px;"
+               aria-label="Model username to add"
+               onkeydown="if(event.key==='Enter'){liveAdd()}"/>
+        <select id="live-new-site" aria-label="Cam site" style="flex: 0 0 200px;">
+          <option value="">— Choose site —</option>
+        </select>
+        <input id="live-new-roomid" type="text" placeholder="Room ID (if required)"
+               style="flex: 0 0 180px; display: none;"
+               aria-label="Room ID"/>
+        <button class="primary" onclick="liveAdd()">+ Track</button>
+      </div>
+      <p class="muted" style="margin-top: 8px; font-size: 12px;" id="live-site-hint"></p>
+    </div>
+
+    <!-- Filters -->
+    <div class="filter-row" role="toolbar" aria-label="Model filters">
+      <input id="live-filter" type="text" placeholder="Filter by username..."
+             oninput="renderLiveModels()" style="min-width:220px;"
+             aria-label="Filter models"/>
+      <select id="live-site-filter" onchange="renderLiveModels()" aria-label="Filter by site">
+        <option value="">All sites</option>
+      </select>
+      <select id="live-status-filter" onchange="renderLiveModels()" aria-label="Filter by status">
+        <option value="">All states</option>
+        <option value="PUBLIC">Recording (PUBLIC)</option>
+        <option value="PRIVATE">Private</option>
+        <option value="OFFLINE,LONG_OFFLINE">Offline</option>
+        <option value="ONLINE">Connecting</option>
+        <option value="RATELIMIT,CLOUDFLARE,RESTRICTED,ERROR">Problems</option>
+        <option value="NOTRUNNING">Not polling</option>
+      </select>
+      <div style="margin-left:auto; display:flex; gap:6px;">
+        <button class="chip" data-sort="status"  onclick="liveSetSort('status')">by status</button>
+        <button class="chip" data-sort="name"    onclick="liveSetSort('name')">by name</button>
+        <button class="chip" data-sort="site"    onclick="liveSetSort('site')">by site</button>
+        <button class="chip" data-sort="size"    onclick="liveSetSort('size')">by size</button>
+      </div>
+    </div>
+
+    <!-- Model grid -->
+    <div id="live-models" class="live-grid"></div>
+  </div>
+</section><!-- /page-live -->
+
+</div>
+
+<!-- Command palette -->
+<div class="modal-backdrop" id="palette-modal" onclick="closePalette(event)" role="dialog" aria-label="Command palette" aria-modal="true">
+  <div class="modal-card palette" onclick="event.stopPropagation()">
+    <input id="palette-input" type="text" placeholder="Type a command or search..."
+           autocomplete="off" oninput="paletteFilter()"
+           onkeydown="paletteKey(event)"/>
+    <div id="palette-list" role="listbox"></div>
+    <div class="palette-footer muted">
+      <span>↑↓ navigate</span> · <span>↵ run</span> · <span>Esc close</span>
+    </div>
   </div>
 </div>
 
@@ -1454,6 +1714,281 @@ async function refreshAll() {
   toast('Refreshed');
 }
 
+// ── Tab switching ────────────────────────────────────────────────────────
+let _currentPage = 'archive';
+let _liveSort = 'status';
+
+function switchTab(page) {
+  _currentPage = page;
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    const active = btn.dataset.page === page;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  document.getElementById('page-archive').hidden = page !== 'archive';
+  document.getElementById('page-live').hidden = page !== 'live';
+  document.getElementById('archive-controls').style.display = page === 'archive' ? 'flex' : 'none';
+  document.getElementById('live-controls').style.display = page === 'live' ? 'flex' : 'none';
+  if (page === 'live') {
+    liveLoadSites();
+    liveRefresh();
+  }
+  // Update URL hash so it's shareable / refresh-friendly
+  if (history.replaceState) history.replaceState(null, '', '#' + page);
+}
+
+// ── Live recording ───────────────────────────────────────────────────────
+let _liveSnapshot = {available: false, models: [], summary: {}};
+let _liveSites = [];
+
+async function liveLoadSites() {
+  if (_liveSites.length) return;
+  try {
+    const d = await api('/api/live/sites');
+    _liveSites = d.sites || [];
+    const sel = document.getElementById('live-new-site');
+    const fsel = document.getElementById('live-site-filter');
+    _liveSites.forEach(s => {
+      const o1 = document.createElement('option');
+      o1.value = s.name; o1.textContent = `${s.name} (${s.slug})`;
+      if (s.needs_room_id) o1.dataset.needsRoomId = '1';
+      sel.appendChild(o1);
+      const o2 = document.createElement('option');
+      o2.value = s.name; o2.textContent = s.name;
+      fsel.appendChild(o2);
+    });
+    sel.onchange = () => {
+      const opt = sel.options[sel.selectedIndex];
+      const needsRoomId = opt && opt.dataset.needsRoomId === '1';
+      const rin = document.getElementById('live-new-roomid');
+      rin.style.display = needsRoomId ? '' : 'none';
+      document.getElementById('live-site-hint').textContent = needsRoomId
+        ? 'This site requires a numeric room ID — find it in the stream page URL.'
+        : '';
+    };
+  } catch(e) {
+    console.error('liveLoadSites', e);
+  }
+}
+
+async function liveRefresh() {
+  try {
+    _liveSnapshot = await api('/api/live/status');
+  } catch(e) {
+    console.error('liveRefresh', e);
+    return;
+  }
+  const avail = !!_liveSnapshot.available;
+  document.getElementById('live-available').style.display = avail ? '' : 'none';
+  document.getElementById('live-unavailable').style.display = avail ? 'none' : '';
+  if (!avail) {
+    document.getElementById('live-error').textContent =
+      _liveSnapshot.import_error ? 'Error: ' + _liveSnapshot.import_error : '';
+    return;
+  }
+  const s = _liveSnapshot.summary || {};
+  document.getElementById('live-stat-total').textContent = s.total ?? 0;
+  document.getElementById('live-stat-running').textContent = s.running ?? 0;
+  document.getElementById('live-stat-recording').textContent = s.recording ?? 0;
+  document.getElementById('live-stat-size').textContent = bytesHuman(s.total_bytes || 0);
+  // Top bar "Live" tab badge (only show count when > 0)
+  const badge = document.getElementById('tab-live-badge');
+  if ((s.recording || 0) > 0) {
+    badge.textContent = s.recording; badge.hidden = false;
+  } else {
+    badge.hidden = true;
+  }
+  renderLiveModels();
+}
+
+function liveSetSort(mode) {
+  _liveSort = mode;
+  document.querySelectorAll('.chip[data-sort]').forEach(el => {
+    el.classList.toggle('active', el.dataset.sort === mode);
+  });
+  renderLiveModels();
+}
+
+function renderLiveModels() {
+  const root = document.getElementById('live-models');
+  let models = [...(_liveSnapshot.models || [])];
+  const filter = document.getElementById('live-filter').value.toLowerCase();
+  const siteF = document.getElementById('live-site-filter').value;
+  const statusF = document.getElementById('live-status-filter').value;
+  if (filter) models = models.filter(m => m.username.toLowerCase().includes(filter));
+  if (siteF) models = models.filter(m => m.site === siteF);
+  if (statusF) {
+    const ok = new Set(statusF.split(','));
+    models = models.filter(m => ok.has(m.status));
+  }
+  const statusRank = {PUBLIC:0, PRIVATE:1, ONLINE:2, OFFLINE:3, LONG_OFFLINE:4,
+                      RATELIMIT:5, CLOUDFLARE:5, RESTRICTED:5, ERROR:6,
+                      DELETED:7, NOTEXIST:7, NOTRUNNING:8, UNKNOWN:9};
+  const sorts = {
+    status: (a,b) => (statusRank[a.status]||9) - (statusRank[b.status]||9) || a.username.localeCompare(b.username),
+    name:   (a,b) => a.username.localeCompare(b.username),
+    site:   (a,b) => a.site.localeCompare(b.site) || a.username.localeCompare(b.username),
+    size:   (a,b) => b.size_bytes - a.size_bytes,
+  };
+  models.sort(sorts[_liveSort] || sorts.status);
+
+  if (!models.length) {
+    root.innerHTML = `<div class="empty-state" style="grid-column: 1 / -1;">
+      <svg class="big-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9" opacity=".35"/></svg>
+      <div>No models tracked. Add one above.</div>
+    </div>`;
+    return;
+  }
+
+  root.innerHTML = models.map(m => {
+    const dot = `<span class="state-dot ${m.status_color}" aria-hidden="true"></span>`;
+    const recClass = m.recording ? 'recording' : '';
+    const size = m.size_bytes ? bytesHuman(m.size_bytes) : '—';
+    return `<div class="live-card ${recClass}">
+      <div class="top">
+        <span class="username" title="${escapeHtml(m.username)}">${escapeHtml(m.username)}</span>
+        <span class="site-chip" data-tip="Site slug: ${escapeHtml(m.site_slug)}">${escapeHtml(m.site)}</span>
+      </div>
+      <div class="status-row">
+        ${dot}
+        <span class="state-label ${m.status_color}">${escapeHtml(m.status_label)}</span>
+        <span style="flex:1"></span>
+        <span class="meta" data-tip="Recorded size">${size}</span>
+      </div>
+      ${m.room_id ? `<div class="meta">room ${escapeHtml(m.room_id)}</div>` : ''}
+      ${m.country ? `<div class="meta">${escapeHtml(m.country)}${m.gender ? ' · '+escapeHtml(m.gender) : ''}</div>` : ''}
+      <div class="actions">
+        ${m.running
+          ? `<button class="danger" onclick="liveStop('${m.username}','${m.site}')">■ Stop</button>`
+          : `<button class="success" onclick="liveStart('${m.username}','${m.site}')">▶ Start</button>`}
+        <button class="ghost" onclick="liveRemove('${m.username}','${m.site}')"
+                data-tip="Remove from tracking" aria-label="Remove">✕</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function liveAdd() {
+  const username = document.getElementById('live-new-username').value.trim();
+  const site = document.getElementById('live-new-site').value;
+  const roomId = document.getElementById('live-new-roomid').value.trim() || null;
+  if (!username || !site) { toast('Pick a site + enter username', 'error'); return; }
+  try {
+    await api('/api/live/add', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({username, site, room_id: roomId})});
+    toast(`Added ${username} [${site}]`, 'success');
+    document.getElementById('live-new-username').value = '';
+    document.getElementById('live-new-roomid').value = '';
+    liveRefresh();
+  } catch(e) { toast('Error: '+e.message, 'error'); }
+}
+async function liveRemove(username, site) {
+  if (!confirm(`Remove ${username} [${site}] from tracking?`)) return;
+  try {
+    await api('/api/live/remove', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({username, site})});
+    toast(`Removed ${username}`);
+    liveRefresh();
+  } catch(e) { toast('Error: '+e.message, 'error'); }
+}
+async function liveStart(username, site) {
+  try {
+    await api('/api/live/start', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({username, site})});
+    toast(`Started ${username}`, 'success');
+    setTimeout(liveRefresh, 400);
+  } catch(e) { toast('Error: '+e.message, 'error'); }
+}
+async function liveStop(username, site) {
+  try {
+    await api('/api/live/stop', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({username, site})});
+    toast(`Stopped ${username}`);
+    setTimeout(liveRefresh, 400);
+  } catch(e) { toast('Error: '+e.message, 'error'); }
+}
+async function liveToggleAll(on) {
+  if (!confirm(on ? 'Start polling ALL tracked models?' : 'Stop ALL models?')) return;
+  try {
+    const r = await api('/api/live/toggle_all', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({running: on})});
+    toast(`${on ? 'Started' : 'Stopped'} ${r.count} models`, 'success');
+    setTimeout(liveRefresh, 500);
+  } catch(e) { toast('Error: '+e.message, 'error'); }
+}
+
+// ── Command palette (Ctrl+K) ─────────────────────────────────────────────
+const _paletteCmds = [
+  {label:'Refresh everything',  kbd:'F5',     run:() => refreshAll()},
+  {label:'Start all downloads', kbd:'',       run:() => startDownload()},
+  {label:'Stop download',       kbd:'',       run:() => stopDownload()},
+  {label:'Run dedup',           kbd:'',       run:() => runDedup()},
+  {label:'Open Archive tab',    kbd:'1',      run:() => switchTab('archive')},
+  {label:'Open Live tab',       kbd:'2',      run:() => switchTab('live')},
+  {label:'Focus add-performer',  kbd:'',      run:() => {switchTab('archive'); document.getElementById('new-perf').focus();}},
+  {label:'Focus add-live-model', kbd:'',      run:() => {switchTab('live'); document.getElementById('live-new-username').focus();}},
+  {label:'Start all live models', kbd:'',     run:() => liveToggleAll(true)},
+  {label:'Stop all live models',  kbd:'',     run:() => liveToggleAll(false)},
+  {label:'Enable Tor',           kbd:'',      run:() => enableTor()},
+];
+let _paletteSelected = 0;
+
+function openPalette() {
+  const m = document.getElementById('palette-modal');
+  m.classList.add('show');
+  const inp = document.getElementById('palette-input');
+  inp.value = ''; inp.focus();
+  paletteFilter();
+}
+function closePalette(e) {
+  if (e && e.target && e.target.id !== 'palette-modal') return;
+  document.getElementById('palette-modal').classList.remove('show');
+}
+function paletteFilter() {
+  const q = document.getElementById('palette-input').value.trim().toLowerCase();
+  const matches = _paletteCmds.filter(c =>
+    !q || c.label.toLowerCase().includes(q) || (c.kbd && c.kbd.toLowerCase().includes(q)));
+  _paletteSelected = 0;
+  document.getElementById('palette-list').innerHTML = matches.map((c, i) => `
+    <div class="pcmd ${i === 0 ? 'selected' : ''}" data-idx="${i}"
+         onclick="paletteRun(${_paletteCmds.indexOf(c)})">
+      <span>${escapeHtml(c.label)}</span>
+      ${c.kbd ? `<span class="kbd">${escapeHtml(c.kbd)}</span>` : ''}
+    </div>`).join('');
+  window._paletteMatches = matches;
+}
+function paletteKey(e) {
+  const matches = window._paletteMatches || [];
+  if (e.key === 'Escape') { closePalette(); return; }
+  if (e.key === 'ArrowDown') {
+    e.preventDefault(); _paletteSelected = (_paletteSelected + 1) % matches.length;
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault(); _paletteSelected = (_paletteSelected - 1 + matches.length) % matches.length;
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    const cmd = matches[_paletteSelected];
+    if (cmd) { closePalette(); cmd.run(); }
+    return;
+  } else return;
+  document.querySelectorAll('#palette-list .pcmd').forEach((el, i) => {
+    el.classList.toggle('selected', i === _paletteSelected);
+  });
+}
+function paletteRun(idx) {
+  const cmd = _paletteCmds[idx];
+  if (cmd) { closePalette(); cmd.run(); }
+}
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+    e.preventDefault(); openPalette();
+  } else if (!e.ctrlKey && !e.metaKey && !e.altKey
+             && document.activeElement && document.activeElement.tagName !== 'INPUT'
+             && document.activeElement.tagName !== 'TEXTAREA') {
+    if (e.key === '1') switchTab('archive');
+    else if (e.key === '2') switchTab('live');
+  }
+});
+
 // ── Initial load + polling ───────────────────────────────────────────────
 (async () => {
   await loadSites();
@@ -1466,6 +2001,24 @@ async function refreshAll() {
   setInterval(refreshProgress, 700);   // fast cadence for progress bar
   setInterval(loadHistory, 15000);
   setInterval(loadAuth, 30000);
+  // Live polling — only every 3s and only when Live tab visible
+  setInterval(() => { if (_currentPage === 'live') liveRefresh(); }, 3000);
+  // Always pull ONCE so the "Live" tab badge can update even from Archive tab
+  setInterval(async () => {
+    if (_currentPage !== 'live') {
+      try {
+        const d = await api('/api/live/status');
+        const rec = (d.summary||{}).recording || 0;
+        const badge = document.getElementById('tab-live-badge');
+        if (rec > 0) { badge.textContent = rec; badge.hidden = false; }
+        else { badge.hidden = true; }
+      } catch(e) { /* silent */ }
+    }
+  }, 8000);
+
+  // Respect URL hash (#live → open Live tab)
+  const initial = (location.hash || '').replace('#', '').toLowerCase();
+  if (initial === 'live') switchTab('live');
 })();
 </script>
 </body>
@@ -1667,6 +2220,79 @@ def api_stop():
         _state["pid"] = None
         _runner_thread = None
     return jsonify({"ok": True})
+
+
+@app.route("/api/live/sites")
+def api_live_sites():
+    """Supported cam sites from StreaMonitor."""
+    if not _live:
+        return jsonify({"available": False, "sites": []})
+    return jsonify({"available": _live_available, "sites": _live.list_sites()})
+
+
+@app.route("/api/live/status")
+def api_live_status():
+    """Snapshot of every live model and its current state."""
+    if not _live:
+        return jsonify({"available": False, "models": [], "summary": {}})
+    return jsonify(_live.get_snapshot())
+
+
+@app.route("/api/live/add", methods=["POST"])
+def api_live_add():
+    if not _live:
+        return jsonify({"error": "live recording unavailable (StreaMonitor not installed)"}), 503
+    body = request.get_json(force=True) or {}
+    try:
+        r = _live.add_model(body.get("username", ""), body.get("site", ""),
+                             room_id=body.get("room_id") or None)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(r)
+
+
+@app.route("/api/live/remove", methods=["POST"])
+def api_live_remove():
+    if not _live:
+        return jsonify({"error": "live recording unavailable"}), 503
+    body = request.get_json(force=True) or {}
+    try:
+        r = _live.remove_model(body.get("username", ""), body.get("site", ""))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(r)
+
+
+@app.route("/api/live/start", methods=["POST"])
+def api_live_start():
+    if not _live:
+        return jsonify({"error": "live recording unavailable"}), 503
+    body = request.get_json(force=True) or {}
+    try:
+        r = _live.start_model(body.get("username", ""), body.get("site", ""))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(r)
+
+
+@app.route("/api/live/stop", methods=["POST"])
+def api_live_stop():
+    if not _live:
+        return jsonify({"error": "live recording unavailable"}), 503
+    body = request.get_json(force=True) or {}
+    try:
+        r = _live.stop_model(body.get("username", ""), body.get("site", ""))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(r)
+
+
+@app.route("/api/live/toggle_all", methods=["POST"])
+def api_live_toggle_all():
+    if not _live:
+        return jsonify({"error": "live recording unavailable"}), 503
+    body = request.get_json(force=True) or {}
+    return jsonify(_live.toggle_all(bool(body.get("running", True))))
 
 
 @app.route("/api/tor", methods=["POST"])

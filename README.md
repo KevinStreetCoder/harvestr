@@ -48,6 +48,47 @@ name, and downloads every video — skipping anything it already has.
 | **Resumable** | Re-runs only download new videos; rolling window per site |
 | **Dry-run mode** | See what would be downloaded without touching disk |
 
+## Two modes: Archive & Live
+
+Harvestr runs in **two complementary modes**, switchable with a single tab click
+(or keyboard `2` / `1`) in the web UI:
+
+### 📦 Archive mode (the default)
+
+Given a username, fan out across 50+ sites to **find every video this person has
+ever posted** and download the ones you don't already have. See the [Archive
+section](#archive-mode) below.
+
+### 🔴 Live mode (new — backed by [StreaMonitor](https://github.com/lossless1/StreaMonitor))
+
+Track cam models across **18 platforms** and auto-record the moment they go
+live. Harvestr keeps a lightweight bot per model that polls the site every
+5-30s; when status flips to `PUBLIC`, the HLS/RTMP stream is immediately
+handed to ffmpeg and written to disk. Supported sites out-of-the-box:
+
+| Site | Site | Site |
+|---|---|---|
+| Chaturbate | StripChat / StripChat VR | CamSoda |
+| Cam4 | BongaCams | Flirt4Free |
+| Cherry.tv | Streamate | MyFreeCams |
+| ManyVids | FanslyLive | AmateurTV |
+| CamsCom | DreamCam / DreamCam VR | SexChatHU |
+| XLoveCam | | |
+
+**Setup:** clone StreaMonitor to `C:\F\StreaMonitor` (or set `HARVESTR_STREAMONITOR=<path>`
+env var). Harvestr auto-detects it; the Live tab lights up. Otherwise, the
+Live tab shows a friendly "install StreaMonitor to enable" banner.
+
+**UI features:**
+- Per-model cards with animated state dots (green pulse = recording, blue = connecting, purple = private, yellow = offline, red = problem)
+- Filter by site, by status bucket, by username substring
+- Sort by status / name / site / recorded size
+- Live badge on the tab when any recording is active
+- Bulk start/stop all
+- Command palette (`Ctrl+K`) for quick actions across both tabs
+
+---
+
 ## Supported sites (partial list)
 
 ### Mainstream
@@ -386,3 +427,7 @@ Stands on the shoulders of:
 - [**curl_cffi**](https://github.com/lexiforest/curl_cffi) — Chrome TLS fingerprint
 - [**cloudscraper**](https://github.com/VeNoMouS/cloudscraper) — Cloudflare IUAM bypass
 - [**Flask**](https://flask.palletsprojects.com/) — web UI
+- [**StreaMonitor**](https://github.com/lossless1/StreaMonitor) — the entire Live-mode
+  backend is StreaMonitor's 19-site `Bot` framework. We import it at runtime rather
+  than reimplementing the per-site reverse-engineering; they've earned those lines
+  of code the hard way

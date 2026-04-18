@@ -63,6 +63,38 @@ except ImportError:
     print("ERROR: yt-dlp is not installed. Run: pip install -U \"yt-dlp[default,curl-cffi]\"")
     sys.exit(1)
 
+def _is_404_playlist(title: str, url: str) -> bool:
+    """Heuristic: did our probe/enumerate land on a site-wide 404 page?
+
+    Motherless (notably) returns a 404 HTML page for nonexistent uploader
+    URLs, BUT yt-dlp's MotherlessUploader extractor still parses it and
+    extracts "popular / related" thumbnails displayed on that page. The
+    extractor reports the playlist title as "404 | MOTHERLESS.COM ™" (or
+    similar) while yielding videos that aren't associated with the
+    requested user. Downloading these pollutes the performer folder
+    with unrelated content.
+
+    We detect this by checking whether the page title starts with "404"
+    or contains obvious error-page markers. Returns True if this looks
+    like a 404 page we should skip.
+    """
+    if not title:
+        return False
+    t_lower = title.strip().lower()
+    # Title starts with "404" (most common)
+    if t_lower.startswith("404"):
+        return True
+    # Title is exactly "Not Found" or "Page Not Found" / similar
+    for marker in ("page not found", "not found - ", "404 not found",
+                   "error 404", " - 404"):
+        if marker in t_lower:
+            return True
+    # Very short title in a context where the URL is a user-page pattern
+    # could also indicate empty/error state; keep conservative and require
+    # explicit 404 markers so legit pages aren't rejected.
+    return False
+
+
 # Custom scrapers for cam archive sites not supported by yt-dlp
 import custom_scrapers
 from custom_scrapers import (
@@ -541,7 +573,17 @@ class YtdlpEngine:
                 info = ydl.extract_info(url, download=False)
                 if not info:
                     return None
-                return ydl.sanitize_info(info)
+                info = ydl.sanitize_info(info)
+                # Reject probes that landed on site-wide 404 pages: some
+                # extractors (notably Motherless) will dutifully scrape
+                # "popular/related" thumbnails off a 404 error page and
+                # report them as if they were the user's uploads.
+                title = str(info.get("title", ""))
+                if _is_404_playlist(title, url):
+                    self.log.debug(f"Probe rejected: landed on 404 page — {url} "
+                                   f"(title: {title!r})")
+                    return None
+                return info
         except yt_dlp.utils.DownloadError as e:
             self.log.debug(f"Probe failed for {url}: {e}")
             return None
@@ -568,6 +610,16 @@ class YtdlpEngine:
                 if not info:
                     return []
                 info = ydl.sanitize_info(info)
+                # Same guard as in probe(): if the site returned a 404 page
+                # and the extractor happily scraped "related/popular" videos
+                # off it, those videos don't belong to the requested user.
+                title = str(info.get("title", ""))
+                if _is_404_playlist(title, url):
+                    self.log.warning(
+                        f"Enumerate rejected: landed on 404 page — {url} "
+                        f"(title: {title!r}). Would have yielded unrelated content."
+                    )
+                    return []
                 entries = info.get("entries") or [info]
                 default_site = site_hint or info.get("extractor_key", "").lower() or "unknown"
                 for e in entries:

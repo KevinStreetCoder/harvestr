@@ -61,6 +61,11 @@ class ProgressTracker:
     JSON file directly — no shared-memory link needed.
     """
 
+    # Class-level subprocess registry: {slot: (Popen, cancel_event)}
+    # Used by cancel_slot() to terminate a running download cleanly.
+    _slot_procs: Dict[int, Any] = {}
+    _cancelled_slots: set = set()
+
     def __init__(self, downloads_dir: Path):
         self.path = Path(downloads_dir) / "_progress.json"
         self.session: Dict[str, Any] = {
@@ -196,18 +201,113 @@ class ProgressTracker:
         """Mark the slot finished. Removes from active list."""
         with self._lock:
             self._active.pop(slot, None)
+            self._slot_procs.pop(slot, None)
+            self._cancelled_slots.discard(slot)
             if status in ("ok", "fail", "skip"):
                 self.session[status] = int(self.session.get(status, 0)) + 1
         self._flush()
 
+    def register_subprocess(self, slot: int, proc: Any) -> None:
+        """Bind a running Popen to a slot so cancel_slot can terminate it."""
+        with self._lock:
+            self._slot_procs[slot] = proc
+            if slot in self._cancelled_slots:
+                # Cancel arrived before we registered — kill immediately
+                self._kill_proc_locked(slot, proc)
+
+    def cancel_slot(self, slot: int) -> bool:
+        """Terminate the running download at `slot`. Returns True if a
+        process was actually killed; False if slot wasn't active.
+
+        The download thread will see the subprocess exit non-zero, log
+        a cancellation, and continue to the next queued item."""
+        with self._lock:
+            proc = self._slot_procs.get(slot)
+            self._cancelled_slots.add(slot)   # in case proc registers later
+            if not proc:
+                # Maybe in yt-dlp path (no registered subprocess) — mark for
+                # the download thread to notice via `is_cancelled(slot)`.
+                return False
+            return self._kill_proc_locked(slot, proc)
+
+    def is_cancelled(self, slot: int) -> bool:
+        # Opportunistic cross-process sync: the webui (different process)
+        # writes cancel requests into _progress.json. Pick them up here so
+        # the downloader sees them even though it has its own tracker.
+        self._ingest_external_cancels()
+        with self._lock:
+            return slot in self._cancelled_slots
+
+    def _ingest_external_cancels(self) -> None:
+        """Read cancelled_slots written by another process (the webui) out of
+        our own progress JSON file, and merge them into our in-memory set.
+
+        Called from is_cancelled() (hot path on every downloader tick) and
+        on each flush so kills are applied promptly."""
+        try:
+            if not self.path.exists():
+                return
+            with open(self.path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return
+        ext = data.get("cancelled_slots") or []
+        if not ext:
+            return
+        with self._lock:
+            newly_cancelled = []
+            for s in ext:
+                try:
+                    s = int(s)
+                except Exception:
+                    continue
+                if s not in self._cancelled_slots:
+                    self._cancelled_slots.add(s)
+                    newly_cancelled.append(s)
+            # Kill any already-running subprocesses for the new cancels
+            for s in newly_cancelled:
+                proc = self._slot_procs.get(s)
+                if proc:
+                    self._kill_proc_locked(s, proc)
+
+    def _kill_proc_locked(self, slot: int, proc: Any) -> bool:
+        """Terminate a subprocess. Caller must hold self._lock."""
+        try:
+            if proc.poll() is None:  # still running
+                if os.name == "nt":
+                    # On Windows, taskkill /T /F to nuke the process tree
+                    import subprocess
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                        capture_output=True, timeout=5,
+                    )
+                else:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except Exception:
+                        proc.kill()
+                return True
+        except Exception:
+            pass
+        return False
+
     # ── flush ────────────────────────────────────────────────────────
 
     def _flush(self) -> None:
-        """Atomic-rename write. Swallows transient Windows lock errors."""
+        """Atomic-rename write. Swallows transient Windows lock errors.
+
+        Also merges any externally-written cancelled_slots (from the webui
+        process) into our in-memory set before writing — this keeps the
+        cross-process cancel pipe alive across our atomic-rename writes."""
+        self._ingest_external_cancels()
+        with self._lock:
+            cancelled_list = sorted(self._cancelled_slots)
         snapshot = {
             "updated_at": _now_iso(),
             "session": dict(self.session),
             "active": list(self._active.values()),
+            "cancelled_slots": cancelled_list,
         }
         try:
             tmp_fd, tmp_path = tempfile.mkstemp(
@@ -233,11 +333,23 @@ class ProgressTracker:
             pass
 
 
+class CancelledBySlot(Exception):
+    """Raised from a yt-dlp progress hook when the user clicks Skip.
+    yt-dlp will unwind and surface this as a DownloadError, which we catch
+    in the download loop and convert to a skip (not fail)."""
+    pass
+
+
 def make_yt_dlp_hook(tracker: ProgressTracker, slot: int):
     """Return a progress_hooks callable for yt-dlp. Updates tracker on each
-    status=downloading event. Finishes slot on status=finished/error."""
+    status=downloading event, and aborts the download if the user cancelled
+    the slot via the web UI."""
     def hook(d: dict) -> None:
         status = d.get("status", "")
+        # Cancel check happens on every tick — if the webui flipped this
+        # slot to cancelled, raise out of the hook to abort yt-dlp.
+        if tracker.is_cancelled(slot):
+            raise CancelledBySlot(f"slot {slot} cancelled by user")
         if status == "downloading":
             bytes_done = d.get("downloaded_bytes") or 0
             bytes_total = (d.get("total_bytes")

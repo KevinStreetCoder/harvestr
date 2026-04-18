@@ -1129,7 +1129,12 @@ class UniversalDownloader:
     def _download_custom_mp4(self, v: VideoRef, out_path: Path,
                              progress_slot: Optional[int] = None) -> bool:
         """Download a direct MP4 URL. Tries aria2c first, falls back to curl
-        if aria2c fails (some CDNs don't play well with aria2c's TLS)."""
+        if aria2c fails (some CDNs don't play well with aria2c's TLS).
+
+        Sets self._last_mp4_error to 'network' when both backends fail with
+        a connection-level error (refused/timeout/DNS) so the caller can
+        reclassify as skip (CDN outage) instead of permanent failure."""
+        self._last_mp4_error = None
         ok = False
         if ARIA2C_PATH:
             ok = self._download_via_aria2c(v, out_path, progress_slot=progress_slot)
@@ -1224,6 +1229,9 @@ class UniversalDownloader:
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, bufsize=1,
                 )
+                # Register with tracker so /api/progress/cancel can kill it
+                if progress_slot is not None:
+                    self.progress.register_subprocess(progress_slot, proc)
                 deadline = time.time() + 3600
                 assert proc.stdout is not None
                 for line in proc.stdout:
@@ -1311,11 +1319,28 @@ class UniversalDownloader:
             threading.Thread(target=_poll, daemon=True).start()
 
         try:
-            r = subprocess.run(cmd, capture_output=True, timeout=3600)
-            ok = r.returncode == 0 and out_path.exists() and out_path.stat().st_size > 100_000
+            # Use Popen so the tracker can cancel us mid-download
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if progress_slot is not None:
+                self.progress.register_subprocess(progress_slot, proc)
+            try:
+                stdout_data, stderr_data = proc.communicate(timeout=3600)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                stdout_data, stderr_data = proc.communicate()
+            rc = proc.returncode
+            ok = rc == 0 and out_path.exists() and out_path.stat().st_size > 100_000
             if not ok:
-                stderr = (r.stderr.decode(errors="replace") if r.stderr else "")[-200:]
-                self.log.debug(f"curl exit={r.returncode} size={out_path.stat().st_size if out_path.exists() else 0} msg={stderr}")
+                stderr = (stderr_data.decode(errors="replace") if stderr_data else "")
+                # Curl exit 7 = couldn't connect, 28 = timeout, 6 = can't resolve.
+                # These are network-level failures (CDN down, DNS blocked, etc.),
+                # not real "this video is gone" failures. Flag for skip.
+                if rc in (6, 7, 28) or "could not connect" in stderr.lower() \
+                        or "connection refused" in stderr.lower() \
+                        or "failed to connect" in stderr.lower() \
+                        or "could not resolve host" in stderr.lower():
+                    self._last_mp4_error = "network"
+                self.log.debug(f"curl exit={rc} size={out_path.stat().st_size if out_path.exists() else 0} msg={stderr[-200:]}")
             return ok
         except Exception as e:
             self.log.debug(f"curl error: {e}")
@@ -1323,7 +1348,8 @@ class UniversalDownloader:
         finally:
             stop_flag[0] = True
 
-    def _download_custom_hls(self, v: VideoRef, out_path: Path) -> bool:
+    def _download_custom_hls(self, v: VideoRef, out_path: Path,
+                              progress_slot: Optional[int] = None) -> bool:
         """Download HLS m3u8 via ffmpeg."""
         if not FFMPEG_PATH:
             self.log.warning("ffmpeg not found — can't download HLS")
@@ -1345,8 +1371,15 @@ class UniversalDownloader:
             "-y", str(out_path),
         ]
         try:
-            r = subprocess.run(cmd, capture_output=True, timeout=3600)
-            return r.returncode == 0 and out_path.exists() and out_path.stat().st_size > 100_000
+            # Use Popen so cancel_slot() can terminate ffmpeg mid-stream
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if progress_slot is not None:
+                self.progress.register_subprocess(progress_slot, proc)
+            try:
+                proc.communicate(timeout=3600)
+            except subprocess.TimeoutExpired:
+                proc.kill(); proc.communicate()
+            return proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 100_000
         except Exception as e:
             self.log.debug(f"ffmpeg error: {e}")
             return False
@@ -1417,19 +1450,39 @@ class UniversalDownloader:
             site=v.site, video_id=v.video_id,
             title=v.title or v.video_id, backend=backend,
         )
+        cancelled = False
         try:
             if v.stream_kind == "hls":
-                ok = self._download_custom_hls(v, out_path)
+                ok = self._download_custom_hls(v, out_path, progress_slot=slot)
             else:
                 ok = self._download_custom_mp4(v, out_path, progress_slot=slot)
         finally:
+            cancelled = self.progress.is_cancelled(slot)
             # Flash 100 % on success so the bar visually completes
             if ok and out_path.exists():
                 fsz = out_path.stat().st_size
                 self.progress.update_video(slot, bytes_done=fsz, bytes_total=fsz, percent=100.0)
-            self.progress.finish_video(slot, status="ok" if ok else "fail")
+            final_status = "skip" if cancelled else ("ok" if ok else "fail")
+            self.progress.finish_video(slot, status=final_status)
+
+        if cancelled:
+            # User clicked "Skip" in the UI. Clean up partial and move on.
+            try:
+                if out_path.exists():
+                    out_path.unlink()
+            except Exception:
+                pass
+            self.log.info(f"  CANCELLED: {v.site}/{v.video_id}: {v.title[:60]}")
+            return ("skip", v, None)
 
         if not ok:
+            # Network-level failure (CDN down, DNS blocked, connection refused)
+            # → treat as skip (not fail) so we don't record as permanent — will
+            # retry on next run when the user's routing/VPN changes.
+            if getattr(self, "_last_mp4_error", None) == "network":
+                self.log.info(f"  NETWORK-BLOCKED: {v.site}/{v.video_id} "
+                              f"(CDN unreachable — try a different VPN): {v.title[:60]}")
+                return ("skip", v, None)
             self.failed.record_failure(v, f"{v.stream_kind or 'mp4'} download failed", 0)
             self.log.warning(f"  FAIL dl: {v.site}/{v.video_id}: {v.title[:60]}")
             return ("fail", v, None)
@@ -1462,16 +1515,32 @@ class UniversalDownloader:
                 site=v.site, video_id=v.video_id,
                 title=v.title or v.video_id, backend="yt-dlp",
             )
+            cancelled = False
             try:
                 info = self.engine.download(
                     v, self.output_dir,
                     progress_hook=make_yt_dlp_hook(self.progress, slot),
                 )
+            except Exception as e:
+                # CancelledBySlot bubbles up from the progress hook as a
+                # yt-dlp DownloadError. Detect both the direct raise and
+                # the wrapped form.
+                msg = str(e)
+                if "cancelled by user" in msg or "CancelledBySlot" in msg:
+                    cancelled = True
+                    info = None
+                else:
+                    raise
             finally:
+                if not cancelled:
+                    cancelled = self.progress.is_cancelled(slot)
                 # Always clean up the active slot; finish counters happen below
                 # via session_increment
                 self.progress._active.pop(slot, None)
                 self.progress._flush()
+            if cancelled:
+                self.log.info(f"  CANCELLED: {v.site}/{v.video_id}: {v.title[:60]}")
+                return ("skip", v, None)
             if not info:
                 self.failed.record_failure(v, "yt-dlp download failed", 0)
                 self.log.warning(f"  FAIL: {v.site}/{v.video_id}: {v.title[:60]}")

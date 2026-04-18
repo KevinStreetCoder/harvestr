@@ -376,6 +376,9 @@ INDEX_HTML = r"""
   button.danger:hover { background: linear-gradient(180deg, #f56363, #c04830); }
   button.success { background: linear-gradient(180deg, #48d37c, #2ea85c);
                    border-color: #48d37c; color: white; }
+  button.warn { background: linear-gradient(180deg, #f0a53a, #c6781b);
+                border-color: #f0a53a; color: #1a1206; font-weight: 600; }
+  button.warn:hover { background: linear-gradient(180deg, #ffb84f, #d78825); }
   button.ghost { background: transparent; }
   button.ghost:hover { background: var(--bg-3); }
   button:disabled { opacity: 0.35; cursor: not-allowed; }
@@ -507,10 +510,28 @@ INDEX_HTML = r"""
                     border: 1px solid #1e4773; }
   .progress-card h2 { color: var(--accent); }
   .dl-active { margin-bottom: 10px; padding: 10px 12px;
-                background: #0b1320; border: 1px solid #1c2438; border-radius: 8px; }
-  .dl-active .top { display: flex; align-items: baseline; gap: 10px; font-size: 12.5px; margin-bottom: 6px; }
+                background: #0b1320; border: 1px solid #1c2438; border-radius: 8px;
+                transition: border-color .18s, background .18s, opacity .18s; }
+  .dl-active:hover { border-color: #284a77; }
+  .dl-active.cancelling { opacity: 0.55; border-color: #5b2a2a; background: #1a0f14; }
+  .dl-active .top { display: flex; align-items: center; gap: 10px; font-size: 12.5px; margin-bottom: 6px; }
   .dl-active .top .title { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dl-active .top .meta { color: var(--text-3); font-size: 11.5px; font-family: "JetBrains Mono", monospace; }
+  .dl-cancel {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; padding: 0; margin: 0;
+    background: transparent; color: var(--text-3);
+    border: 1px solid #2a3244; border-radius: 6px;
+    cursor: pointer; font-size: 13px; line-height: 1;
+    transition: all .15s ease; flex-shrink: 0;
+  }
+  .dl-cancel:hover {
+    background: #3d1420; color: #ff6b7d; border-color: #7a2b3b;
+    transform: scale(1.05);
+  }
+  .dl-cancel:active { transform: scale(0.95); }
+  .dl-cancel:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+  .dl-cancel svg { width: 12px; height: 12px; }
   .progress-bar {
     height: 8px; background: #0a0e18; border-radius: 4px; overflow: hidden;
     position: relative; border: 1px solid #1c2438;
@@ -557,16 +578,51 @@ INDEX_HTML = r"""
     background: #103d1d; color: #6dea8c; border-color: #225a2d;
   }
 
-  /* Tooltips */
+  /* Tooltips — use max z-index + escape via filter so cards can't clip */
   [data-tip] { position: relative; }
-  [data-tip]:hover::after {
-    content: attr(data-tip); position: absolute; z-index: 100;
-    bottom: 100%; left: 50%; transform: translateX(-50%);
-    background: #0a0e18; color: var(--text); padding: 6px 10px;
-    border-radius: 6px; font-size: 11.5px; white-space: nowrap;
-    border: 1px solid var(--border-2); margin-bottom: 5px;
+  [data-tip]:hover::after,
+  [data-tip]:focus-visible::after {
+    content: attr(data-tip);
+    position: absolute;
+    z-index: 9999;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: #0a0e18;
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    line-height: 1.3;
+    white-space: nowrap;
+    border: 1px solid var(--border-2);
     box-shadow: 0 4px 12px #00000080;
+    pointer-events: none;
+    opacity: 0;
+    animation: tip-in .14s ease-out forwards;
+    animation-delay: .35s;
   }
+  [data-tip]:hover::before,
+  [data-tip]:focus-visible::before {
+    content: '';
+    position: absolute;
+    z-index: 9999;
+    bottom: calc(100% + 2px);
+    left: 50%;
+    transform: translateX(-50%);
+    border: 4px solid transparent;
+    border-top-color: var(--border-2);
+    pointer-events: none;
+    opacity: 0;
+    animation: tip-in .14s ease-out forwards;
+    animation-delay: .35s;
+  }
+  @keyframes tip-in { from { opacity: 0; transform: translateX(-50%) translateY(2px); }
+                        to   { opacity: 1; transform: translateX(-50%) translateY(0); } }
+
+  /* Cards need visible overflow so tooltips can escape — but inner panels
+     with internal scroll areas keep their overflow for real content. */
+  .card { overflow: visible; }
 
   /* Config */
   .config-table { font-size: 13px; }
@@ -641,6 +697,36 @@ INDEX_HTML = r"""
                                 border: 2px solid transparent; background-clip: padding-box; }
   *::-webkit-scrollbar-thumb:hover { background: #4d5570;
                                       border: 2px solid transparent; background-clip: padding-box; }
+
+  /* Professional confirm / prompt dialog */
+  .modal-card.dialog {
+    width: min(440px, 92vw); padding: 0; overflow: hidden;
+    background: var(--bg-2); border: 1px solid var(--border-2);
+    box-shadow: 0 24px 60px #00000090;
+  }
+  .dialog-head { padding: 18px 20px 4px; }
+  .dialog-head .icon-wrap {
+    width: 38px; height: 38px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--bg-3); margin-bottom: 10px;
+  }
+  .dialog-head .icon-wrap svg { width: 20px; height: 20px; }
+  .dialog-head.danger  .icon-wrap { background: #3d1010; color: var(--bad); }
+  .dialog-head.warn    .icon-wrap { background: #3d3010; color: var(--warn); }
+  .dialog-head.info    .icon-wrap { background: #0f2941; color: var(--accent); }
+  .dialog-head h3 { margin: 0 0 6px; font-size: 16px; font-weight: 700; }
+  .dialog-head .msg { margin: 0; font-size: 13.5px; line-height: 1.55; color: var(--text-2); }
+  .dialog-head .msg code { background: var(--bg-3); padding: 1px 6px; border-radius: 3px;
+                            color: var(--accent); font-size: 12px; }
+  .dialog-input-wrap { padding: 14px 20px 4px; }
+  .dialog-input-wrap input {
+    width: 100%; padding: 10px 12px; font-size: 14px;
+    font-family: "JetBrains Mono", Consolas, monospace;
+  }
+  .dialog-actions {
+    padding: 14px 20px 16px; display: flex; justify-content: flex-end; gap: 8px;
+  }
+  .dialog-actions button { min-width: 88px; justify-content: center; }
 
   /* Bulk-add modal */
   .modal-card.bulkadd {
@@ -1289,6 +1375,26 @@ INDEX_HTML = r"""
   </div>
 </div>
 
+<!-- Confirm / prompt dialog (replaces native alert/confirm/prompt) -->
+<div class="modal-backdrop" id="dialog-modal" onclick="closeDialog(event)"
+     role="alertdialog" aria-modal="true" aria-labelledby="dialog-title">
+  <div class="modal-card dialog" onclick="event.stopPropagation()">
+    <div class="dialog-head" id="dialog-head">
+      <div class="icon-wrap" id="dialog-icon"></div>
+      <h3 id="dialog-title"></h3>
+      <p class="msg" id="dialog-msg"></p>
+    </div>
+    <div class="dialog-input-wrap" id="dialog-input-wrap" hidden>
+      <input id="dialog-input" type="text" autocomplete="off"
+             onkeydown="if(event.key==='Enter'){dialogConfirm()}"/>
+    </div>
+    <div class="dialog-actions">
+      <button class="ghost" onclick="dialogCancel()" id="dialog-cancel-btn">Cancel</button>
+      <button class="primary" onclick="dialogConfirm()" id="dialog-ok-btn">OK</button>
+    </div>
+  </div>
+</div>
+
 <!-- Bulk add / import modal (shared between Archive + Live) -->
 <div class="modal-backdrop" id="bulkadd-modal" onclick="closeBulkAdd(event)" role="dialog" aria-modal="true" aria-labelledby="bulkadd-title">
   <div class="modal-card bulkadd" onclick="event.stopPropagation()">
@@ -1476,11 +1582,23 @@ async function refreshProgress() {
         const total = a.bytes_total ? bytesHuman(a.bytes_total) : '?';
         const speed = a.speed_bps ? bytesHuman(a.speed_bps) + '/s' : '—';
         const eta = a.eta_seconds ? secsHuman(a.eta_seconds) : '—';
-        return `<div class="dl-active">
+        const slot = (a.slot !== undefined && a.slot !== null) ? a.slot : -1;
+        const cancelling = (p.cancelled_slots || []).includes(slot);
+        const btnTitle = cancelling ? 'Cancelling…' : 'Skip this download';
+        return `<div class="dl-active${cancelling ? ' cancelling' : ''}" data-slot="${slot}">
           <div class="top">
             <span class="pill ${a.backend === 'yt-dlp' ? 'ytdlp' : 'custom'}">${escapeHtml(a.site || '?')}</span>
             <span class="title" title="${escapeHtml(a.title || '')}">${escapeHtml(a.title || a.video_id || '')}</span>
             <span class="meta">${done} / ${total} · ${speed} · ETA ${eta} · ${pct.toFixed(1)}%</span>
+            <button class="dl-cancel" title="${btnTitle}" aria-label="${btnTitle}"
+                    ${slot < 0 || cancelling ? 'disabled' : ''}
+                    onclick="cancelSlot(${slot}, event)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                   stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18"/>
+                <line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
           </div>
           <div class="progress-bar"><div class="fill" style="width:${pct}%"></div></div>
         </div>`;
@@ -1493,6 +1611,43 @@ async function refreshProgress() {
 
     listEl.innerHTML = phaseHtml + hitsHtml + activeHtml;
   } catch (e) { console.error('progress', e); }
+}
+
+// Cancel one active download (skip it, keep the session running)
+async function cancelSlot(slot, ev) {
+  if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+  if (slot === undefined || slot === null || slot < 0) return;
+  const row = document.querySelector('.dl-active[data-slot="' + slot + '"]');
+  const titleEl = row ? row.querySelector('.title') : null;
+  const title = titleEl ? titleEl.textContent.trim() : 'this download';
+
+  const ok = await confirmDialog(
+    'Skip <b>' + escapeHtml(title.slice(0, 80)) + '</b>? It will be marked as skipped and the queue will move to the next video.',
+    {title: 'Skip download?', tone: 'warn', confirmLabel: 'Skip', cancelLabel: 'Keep'}
+  );
+  if (!ok) return;
+
+  // Optimistic UI — grey out the row immediately
+  if (row) {
+    row.classList.add('cancelling');
+    const btn = row.querySelector('.dl-cancel');
+    if (btn) { btn.disabled = true; btn.title = 'Cancelling…'; }
+  }
+  try {
+    const res = await fetch('/api/progress/cancel', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({slot})
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({error: 'failed'}));
+      if (row) row.classList.remove('cancelling');
+      await confirmDialog('Could not cancel: ' + escapeHtml(err.error || 'unknown error'),
+        {title: 'Cancel failed', tone: 'danger', confirmLabel: 'OK', hideCancel: true});
+    }
+  } catch (e) {
+    console.error('cancelSlot', e);
+    if (row) row.classList.remove('cancelling');
+  }
 }
 
 // ── Config ───────────────────────────────────────────────────────────────
@@ -1553,7 +1708,10 @@ async function addPerformer() {
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 async function removePerformer(name) {
-  if (!confirm('Remove ' + name + '?')) return;
+  if (!await confirmDialog(
+        `Remove <code>${escapeHtml(name)}</code> from the performer list?`,
+        {title: 'Remove performer', tone: 'warn',
+         confirmLabel: 'Remove', cancelLabel: 'Keep'})) return;
   try {
     await api('/api/config/performer/remove', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -1898,7 +2056,10 @@ function closePreview(e) {
 async function startDownload() {
   const perfs = _config.performers || [];
   if (!perfs.length) { toast('No performers configured', 'error'); return; }
-  if (!confirm(`Start download for ${perfs.length} performers?`)) return;
+  if (!await confirmDialog(
+        `This will probe every enabled site for <b>${perfs.length}</b> performers and download any new videos found.`,
+        {title: 'Start all downloads', tone: 'info',
+         confirmLabel: 'Start', cancelLabel: 'Cancel'})) return;
   try {
     await api('/api/run', {method: 'POST'});
     toast('Started', 'success');
@@ -1920,7 +2081,10 @@ async function runSingleByName(name) {
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 async function stopDownload() {
-  if (!confirm('Stop running download?')) return;
+  if (!await confirmDialog(
+        'Kill the current download subprocess? Partial files in progress will be deleted.',
+        {title: 'Stop download', tone: 'danger',
+         confirmLabel: 'Stop now', cancelLabel: 'Keep running'})) return;
   try {
     await api('/api/stop', {method:'POST'});
     toast('Stopped');
@@ -1944,7 +2108,10 @@ async function enableTor() {
 }
 
 async function runDedup() {
-  if (!confirm('Run content-based dedup? Deletes duplicate video files (keeps the most descriptive copy).')) return;
+  if (!await confirmDialog(
+        'Scan every performer folder for duplicate video files (using byte-level fingerprints) and <b>delete</b> the extras. Keeps the most descriptive filename.',
+        {title: 'Run dedup', tone: 'warn',
+         confirmLabel: 'Run dedup', cancelLabel: 'Cancel'})) return;
   try {
     const r = await api('/api/dedup', {method:'POST'});
     toast(r.message || 'Dedup complete', 'success');
@@ -2126,7 +2293,10 @@ async function liveAdd() {
   } catch(e) { toast('Error: '+e.message, 'error'); }
 }
 async function liveRemove(username, site) {
-  if (!confirm(`Remove ${username} [${site}] from tracking?`)) return;
+  if (!await confirmDialog(
+        `Stop tracking <b>${escapeHtml(username)}</b> on <b>${escapeHtml(site)}</b>? Existing recorded files stay on disk.`,
+        {title: 'Remove live model', tone: 'warn',
+         confirmLabel: 'Remove', cancelLabel: 'Keep'})) return;
   try {
     await api('/api/live/remove', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({username, site})});
@@ -2151,7 +2321,12 @@ async function liveStop(username, site) {
   } catch(e) { toast('Error: '+e.message, 'error'); }
 }
 async function liveToggleAll(on) {
-  if (!confirm(on ? 'Start polling ALL tracked models?' : 'Stop ALL models?')) return;
+  if (!await confirmDialog(
+        on ? 'Start polling every tracked model. Recording will begin automatically when any of them go live.'
+           : 'Stop polling all models. Running recordings will be terminated.',
+        {title: on ? 'Start all live' : 'Stop all live',
+         tone: on ? 'info' : 'danger',
+         confirmLabel: on ? 'Start all' : 'Stop all'})) return;
   try {
     const r = await api('/api/live/toggle_all', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({running: on})});
@@ -2240,11 +2415,12 @@ function renderDisk() {
 }
 
 async function diskWipe(performer) {
-  if (!confirm(
-    `DELETE every video for "${performer}"?\n\n` +
-    `This will also remove matching entries from history.json so they can be\n` +
-    `re-downloaded if you run this performer again later.\n\n` +
-    `This cannot be undone.`)) return;
+  if (!await confirmDialog(
+        `Permanently delete every video for <b>${escapeHtml(performer)}</b>?<br><br>` +
+        `This also removes matching entries from <code>history.json</code>, ` +
+        `so the next run will re-download from scratch. This cannot be undone.`,
+        {title: 'Wipe performer', tone: 'danger',
+         confirmLabel: 'Delete all', cancelLabel: 'Cancel'})) return;
   try {
     const r = await api('/api/disk/wipe', {method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -2256,8 +2432,12 @@ async function diskWipe(performer) {
 }
 
 async function diskPruneOlder() {
-  const raw = prompt('Delete videos older than how many days?\n(dry-run first, then confirm)', '90');
-  if (!raw) return;
+  const raw = await promptDialog(
+    'Delete videos older than how many days? (We will show a dry-run preview before anything is deleted.)',
+    {title: 'Prune by age', tone: 'warn',
+     defaultValue: '90', inputType: 'number', placeholder: 'days',
+     confirmLabel: 'Preview'});
+  if (raw === null || raw === '') return;
   const days = parseInt(raw, 10);
   if (!days || days < 1) { toast('Enter a positive integer', 'error'); return; }
   try {
@@ -2265,9 +2445,11 @@ async function diskPruneOlder() {
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({days})});
     if (preview.file_count === 0) { toast('Nothing older than ' + days + ' days'); return; }
-    if (!confirm(
-      `Found ${preview.file_count} files older than ${days} days\n` +
-      `(would free ${bytesHuman(preview.would_free_bytes)}).\n\nDelete them?`)) return;
+    if (!await confirmDialog(
+          `Found <b>${preview.file_count}</b> files older than ${days} days.<br>` +
+          `This would free <b>${bytesHuman(preview.would_free_bytes)}</b>.`,
+          {title: 'Confirm prune', tone: 'danger',
+           confirmLabel: 'Delete them', cancelLabel: 'Cancel'})) return;
     const r = await api('/api/disk/prune_older', {method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({days, apply: true})});
@@ -2277,8 +2459,12 @@ async function diskPruneOlder() {
 }
 
 async function diskPruneToFree() {
-  const raw = prompt('Delete oldest videos until how many GB are free?\n(dry-run first)', '25');
-  if (!raw) return;
+  const raw = await promptDialog(
+    'Delete oldest videos until how many GB are free on this drive? (Dry-run first.)',
+    {title: 'Free up space', tone: 'warn',
+     defaultValue: '25', inputType: 'number', placeholder: 'GB',
+     confirmLabel: 'Preview'});
+  if (raw === null || raw === '') return;
   const gb = parseFloat(raw);
   if (!gb || gb <= 0) { toast('Enter a positive number', 'error'); return; }
   try {
@@ -2289,17 +2475,94 @@ async function diskPruneToFree() {
       toast(`Already have ${preview.already_free_gb.toFixed(1)} GB free — no action needed`);
       return;
     }
-    if (!confirm(
-      `Would delete ${preview.would_delete} files to free ${bytesHuman(preview.would_free_bytes)}.\n` +
-      (preview.still_needed_bytes > 0
-        ? `(Not enough old content — ${bytesHuman(preview.still_needed_bytes)} short of target.)\n` : '') +
-      `Continue?`)) return;
+    const shortfall = preview.still_needed_bytes > 0
+      ? `<br><br><span style="color: var(--warn)">Not enough old content — would still be ${bytesHuman(preview.still_needed_bytes)} short of target.</span>` : '';
+    if (!await confirmDialog(
+          `Would delete <b>${preview.would_delete}</b> files to free <b>${bytesHuman(preview.would_free_bytes)}</b>.${shortfall}`,
+          {title: 'Confirm free-up', tone: 'danger',
+           confirmLabel: 'Delete oldest', cancelLabel: 'Cancel'})) return;
     const r = await api('/api/disk/prune_to_free', {method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({target_free_gb: gb, apply: true})});
     toast(`Removed ${r.removed} files · freed ${bytesHuman(r.bytes_freed)}`, 'success');
     loadDisk(true); loadHistory();
   } catch(e) { toast('Error: '+e.message, 'error'); }
+}
+
+// ── Professional confirm / prompt modal ─────────────────────────────────
+// Replaces native window.confirm / window.prompt with a themed dialog.
+// Returns a Promise that resolves to bool (confirm) or string|null (prompt).
+const _dialogIcons = {
+  danger: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`,
+  warn:   `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
+  info:   `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>`,
+};
+let _dialogResolver = null;
+
+function showDialog(opts) {
+  // opts: {title, message, tone: 'danger'|'warn'|'info', confirmLabel, cancelLabel,
+  //        prompt: bool, defaultValue: str}
+  const tone = opts.tone || 'info';
+  const head = document.getElementById('dialog-head');
+  head.className = 'dialog-head ' + tone;
+  document.getElementById('dialog-icon').innerHTML = _dialogIcons[tone] || _dialogIcons.info;
+  document.getElementById('dialog-title').textContent = opts.title || 'Confirm';
+  document.getElementById('dialog-msg').innerHTML = opts.message || '';
+
+  const inputWrap = document.getElementById('dialog-input-wrap');
+  const input = document.getElementById('dialog-input');
+  if (opts.prompt) {
+    inputWrap.hidden = false;
+    input.value = opts.defaultValue || '';
+    input.placeholder = opts.placeholder || '';
+    input.type = opts.inputType || 'text';
+  } else {
+    inputWrap.hidden = true;
+  }
+
+  const ok = document.getElementById('dialog-ok-btn');
+  const cancel = document.getElementById('dialog-cancel-btn');
+  ok.textContent = opts.confirmLabel || 'OK';
+  cancel.textContent = opts.cancelLabel || 'Cancel';
+  cancel.style.display = opts.hideCancel ? 'none' : '';
+  ok.className = tone === 'danger' ? 'danger'
+                : tone === 'warn' ? 'warn' : 'primary';
+
+  document.getElementById('dialog-modal').classList.add('show');
+  setTimeout(() => (opts.prompt ? input : ok).focus(), 60);
+
+  return new Promise((resolve) => { _dialogResolver = resolve; });
+}
+
+function dialogConfirm() {
+  const inputWrap = document.getElementById('dialog-input-wrap');
+  const value = inputWrap.hidden ? true : document.getElementById('dialog-input').value;
+  closeDialog();
+  if (_dialogResolver) { _dialogResolver(value); _dialogResolver = null; }
+}
+function dialogCancel() {
+  const inputWrap = document.getElementById('dialog-input-wrap');
+  const value = inputWrap.hidden ? false : null;
+  closeDialog();
+  if (_dialogResolver) { _dialogResolver(value); _dialogResolver = null; }
+}
+function closeDialog(e) {
+  if (e && e.target && e.target.id !== 'dialog-modal') return;
+  document.getElementById('dialog-modal').classList.remove('show');
+  if (_dialogResolver) {
+    // Backdrop/Escape close counts as cancel
+    const inputWrap = document.getElementById('dialog-input-wrap');
+    _dialogResolver(inputWrap.hidden ? false : null);
+    _dialogResolver = null;
+  }
+}
+
+// Convenience shims
+async function confirmDialog(message, {title='Confirm', tone='info', confirmLabel='Confirm', cancelLabel='Cancel', hideCancel=false} = {}) {
+  return !!(await showDialog({title, message, tone, confirmLabel, cancelLabel, hideCancel}));
+}
+async function promptDialog(message, {title='Enter value', defaultValue='', tone='info', inputType='text', placeholder='', confirmLabel='OK'} = {}) {
+  return showDialog({title, message, tone, prompt:true, defaultValue, inputType, placeholder, confirmLabel});
 }
 
 // ── Bulk add / import modal (shared Archive + Live) ─────────────────────
@@ -2480,7 +2743,9 @@ document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
     e.preventDefault(); openPalette();
   } else if (e.key === 'Escape') {
-    // Close whichever modal is open
+    // Close whichever modal is open (dialog first — it returns a Promise)
+    const dlg = document.getElementById('dialog-modal');
+    if (dlg && dlg.classList.contains('show')) { dialogCancel(); return; }
     ['palette-modal','bulkadd-modal','preview-modal'].forEach(id => {
       const m = document.getElementById(id);
       if (m && m.classList.contains('show')) m.classList.remove('show');
@@ -2726,6 +2991,47 @@ def api_auth():
 @app.route("/api/progress")
 def api_progress():
     return jsonify(read_progress())
+
+
+@app.route("/api/progress/cancel", methods=["POST"])
+def api_progress_cancel():
+    """Cancel a specific active download by its slot id. Kills the
+    underlying aria2c / curl / ffmpeg subprocess; the download loop
+    catches the failure and treats the video as skip (not fail),
+    then continues to the next queued item.
+
+    Note: the download subprocess runs in a DIFFERENT process than
+    the webui (python universal_downloader.py), so we can't call
+    tracker.cancel_slot() directly. Instead we write the cancel
+    request into the shared progress JSON file, and the downloader
+    watches for it on each update cycle.
+    """
+    body = request.get_json(silent=True) or {}
+    try:
+        slot = int(body.get("slot", -1))
+    except Exception:
+        return jsonify({"error": "slot must be an integer"}), 400
+    if slot < 0:
+        return jsonify({"error": "slot required"}), 400
+
+    # Persist cancel request in _progress.json so the downloader sees it
+    progress_path = DOWNLOADS_DIR / "_progress.json"
+    try:
+        data = json.loads(progress_path.read_text(encoding="utf-8")) if progress_path.exists() else {}
+    except Exception:
+        data = {}
+    cancelled = set(data.get("cancelled_slots") or [])
+    cancelled.add(slot)
+    data["cancelled_slots"] = sorted(cancelled)
+    # Atomic write
+    tmp = progress_path.with_suffix(".json.tmp")
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        import os as _os
+        _os.replace(tmp, progress_path)
+    except Exception as e:
+        return jsonify({"error": f"write: {e}"}), 500
+    return jsonify({"ok": True, "slot": slot})
 
 
 @app.route("/api/history")

@@ -146,11 +146,11 @@
     "motherless": {
       "category": "adult",
       "patterns": [
-        "https://motherless.com/m/{u}"
+        "https://motherless.com/u/{u}"
       ],
       "yt_dlp_extractor": "motherless",
       "supports_flat": true,
-      "notes": "Only /m/ (member uploads). /g/ is a group tag that returns unrelated videos."
+      "notes": "yt-dlp's MotherlessUploader extractor requires /u/{user}. (/m/ was the old sites.json path and returns 'Unsupported URL'.)"
     },
     "redtube": {
       "category": "adult",

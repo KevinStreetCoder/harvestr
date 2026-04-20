@@ -97,6 +97,23 @@ def load_json(path: Path) -> dict:
     return {}
 
 
+def save_json(path: Path, data: dict) -> None:
+    """Atomic-rename write for JSON files. Shared by history/failed-reset
+    endpoints so the downloader process doesn't see a half-written file."""
+    import tempfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent),
+                                prefix=f"._{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except Exception:
+        try: os.remove(tmp)
+        except OSError: pass
+        raise
+
+
 def load_sites() -> list[str]:
     """Return a simple list of all site names (yt-dlp + custom scrapers)."""
     return [s["name"] for s in load_sites_detailed()]
@@ -1092,6 +1109,26 @@ INDEX_HTML = r"""
   .drive-legend #disk-lbl-warn.warn { color: var(--warn); font-weight: 600; }
   .drive-legend #disk-lbl-warn.bad  { color: var(--bad);  font-weight: 600; }
 
+  /* Danger zone (history reset) */
+  .danger-zone-title {
+    margin-top: 22px; margin-bottom: 4px; font-size: 12.5px;
+    color: var(--bad); text-transform: uppercase; letter-spacing: .7px;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .danger-zone {
+    background: #1a0f14; border: 1px solid #4b2023; border-radius: 8px;
+    padding: 10px 12px; margin-top: 4px;
+  }
+  .danger-zone .danger-row {
+    display: flex; gap: 8px; align-items: center;
+  }
+  .danger-zone .danger-row select {
+    background: #0f0a0c; border-color: #4b2023; color: var(--text);
+  }
+  .danger-zone button.danger {
+    padding: 5px 10px; font-size: 12px; white-space: nowrap;
+  }
+
   /* Empty state */
   .empty-state {
     text-align: center; padding: 48px 24px; color: var(--text-3);
@@ -1285,6 +1322,38 @@ INDEX_HTML = r"""
 
       <div style="margin-top: 12px;">
         <button class="primary" onclick="saveSettings()">Save settings</button>
+      </div>
+
+      <!-- Danger zone: reset history per performer or all -->
+      <h3 class="danger-zone-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px; height:13px; color:var(--bad);"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        Danger zone
+      </h3>
+      <p class="muted" style="font-size: 12px; margin: 4px 0 10px 0;">
+        Reset history to re-download videos that were already recorded as OK.
+        Useful after deleting files from disk, or when testing scraper changes.
+      </p>
+      <div class="danger-zone">
+        <div class="danger-row">
+          <div style="flex:1;">
+            <select id="reset-performer-select" style="width:100%;">
+              <option value="">Pick a performer…</option>
+            </select>
+          </div>
+          <button class="danger" onclick="resetHistoryOne()" data-tip="Clear this performer's download + failure history">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
+            Reset this one
+          </button>
+        </div>
+        <div class="danger-row" style="margin-top: 8px;">
+          <div class="muted" style="flex:1; font-size:12px;">
+            Reset <b>ALL</b> performers' history — next run will re-probe every site.
+          </div>
+          <button class="danger" onclick="resetHistoryAll()">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            Reset everything
+          </button>
+        </div>
       </div>
     </div>
 
@@ -1863,8 +1932,74 @@ async function loadConfig() {
   g('cfg-live-autoresume').checked  = !!(live.auto_resume ?? true);
   g('cfg-live-postprocess').checked = !!(live.post_process_mp4 ?? false);
   g('cfg-live-keep-n').value        = live.keep_last_n ?? '';
+  // Populate the "reset history" performer dropdown in the Danger zone
+  const rsel = g('reset-performer-select');
+  if (rsel) {
+    const cur = rsel.value;
+    rsel.innerHTML = '<option value="">Pick a performer…</option>' +
+      (_config.performers || []).map(p =>
+        `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('');
+    if (cur) rsel.value = cur;
+  }
   renderPerformers();
   renderSites();
+}
+
+// ── History reset (danger zone) ───────────────────────────────────────
+async function resetHistoryOne() {
+  const sel = document.getElementById('reset-performer-select');
+  const name = (sel && sel.value || '').trim();
+  if (!name) { toast('Pick a performer first', 'error'); return; }
+  const ok = await confirmDialog(
+    `Clear download + failure history for <b>${escapeHtml(name)}</b>?<br><br>` +
+    `Files on disk stay, but Harvestr will treat every video as "never seen" — ` +
+    `next run will re-probe every site and re-download anything new. ` +
+    `Useful if you deleted files from disk or you're testing scraper changes.`,
+    {title: 'Reset history for one performer', tone: 'warn',
+     confirmLabel: 'Reset', cancelLabel: 'Keep'});
+  if (!ok) return;
+  try {
+    const r = await api('/api/history/reset', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({performer: name, include_failed: true})
+    });
+    toast(`Cleared ${r.removed_history} history + ${r.removed_failed} failed`, 'success');
+  } catch(e) { toast('Error: '+e.message, 'error'); }
+}
+
+async function resetHistoryAll() {
+  const cnt = (_config.performers || []).length;
+  const ok = await confirmDialog(
+    `Clear history for <b>ALL ${cnt}</b> performers?<br><br>` +
+    `This wipes history.json AND failed.json completely. Next full run ` +
+    `will re-probe every site for every performer and re-download anything ` +
+    `not already on disk. <b>This cannot be undone</b>.`,
+    {title: 'Reset ALL history', tone: 'danger',
+     confirmLabel: 'Reset everything', cancelLabel: 'Cancel'});
+  if (!ok) return;
+  try {
+    const r = await api('/api/history/reset', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({all: true, include_failed: true})
+    });
+    toast(`Cleared ${r.removed_history} history + ${r.removed_failed} failed`, 'success');
+  } catch(e) { toast('Error: '+e.message, 'error'); }
+}
+
+async function resetHistoryFor(name) {
+  // Called from per-performer row button
+  const ok = await confirmDialog(
+    `Clear <b>${escapeHtml(name)}</b>'s history so the next run re-downloads everything new?`,
+    {title: 'Reset performer history', tone: 'warn',
+     confirmLabel: 'Reset', cancelLabel: 'Keep'});
+  if (!ok) return;
+  try {
+    const r = await api('/api/history/reset', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({performer: name, include_failed: true})
+    });
+    toast(`Cleared ${r.removed_history} history + ${r.removed_failed} failed`, 'success');
+  } catch(e) { toast('Error: '+e.message, 'error'); }
 }
 
 // ── Performers ───────────────────────────────────────────────────────────
@@ -1881,6 +2016,10 @@ function renderPerformers() {
         <span class="name">${escapeHtml(p)}</span>
         <span class="count">${hist_count} videos</span>
         <button class="xs" onclick="runSingleByName('${escapeHtml(p)}'); event.stopPropagation()" data-tip="Run just this one">▶</button>
+        <button class="xs" onclick="resetHistoryFor('${escapeHtml(p)}'); event.stopPropagation()"
+                data-tip="Reset history so next run re-downloads everything" aria-label="Reset history">
+          <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        </button>
         <button class="xs danger" onclick="removePerformer('${escapeHtml(p)}'); event.stopPropagation()">✕</button>
       </div>`;
     }).join('');
@@ -3400,6 +3539,98 @@ def api_history():
 @app.route("/api/failed")
 def api_failed():
     return jsonify(load_json(FAILED_PATH))
+
+
+@app.route("/api/history/reset", methods=["POST"])
+def api_history_reset():
+    """Reset the download-history ledger so videos get re-downloaded even
+    if files were previously recorded as OK.
+
+    Body:
+      {"performer": "<name>"}  → clear only this performer's entries
+      {"performer": "<name>", "sites": ["youtube", ...]} → only on these sites
+      {"all": true}            → clear every performer (requires explicit flag)
+      {"include_failed": true} → also clear failed.json for this performer
+
+    Returns counts of entries removed."""
+    body = request.get_json(silent=True) or {}
+    performer = (body.get("performer") or "").strip()
+    sites_filter = body.get("sites") or []
+    clear_all = bool(body.get("all", False))
+    include_failed = bool(body.get("include_failed", True))
+
+    if not performer and not clear_all:
+        return jsonify({"error": "performer required (or pass {all:true})"}), 400
+
+    # Load
+    history = load_json(HISTORY_PATH) or {}
+    failed = load_json(FAILED_PATH) or {} if include_failed else {}
+
+    removed_history = 0
+    removed_failed = 0
+
+    def _clear_performer(perf_key: str) -> None:
+        nonlocal removed_history, removed_failed
+        entries = history.get(perf_key) or {}
+        if isinstance(entries, dict):
+            if sites_filter:
+                keep = {}
+                for k, v in entries.items():
+                    site = (v or {}).get("site") or (k.split("|")[0] if "|" in k else "")
+                    if site in sites_filter:
+                        removed_history += 1
+                    else:
+                        keep[k] = v
+                history[perf_key] = keep
+            else:
+                removed_history += len(entries)
+                history.pop(perf_key, None)
+        if include_failed and isinstance(failed, dict):
+            f_entries = failed.get(perf_key) or {}
+            if isinstance(f_entries, dict):
+                if sites_filter:
+                    keep_f = {}
+                    for k, v in f_entries.items():
+                        site = (v or {}).get("site") or (k.split("|")[0] if "|" in k else "")
+                        if site in sites_filter:
+                            removed_failed += 1
+                        else:
+                            keep_f[k] = v
+                    failed[perf_key] = keep_f
+                else:
+                    removed_failed += len(f_entries)
+                    failed.pop(perf_key, None)
+
+    if clear_all:
+        for perf_key in list(history.keys()):
+            _clear_performer(perf_key)
+    else:
+        # Case-insensitive match across known keys
+        target_lower = performer.lower()
+        matched = [k for k in history.keys() if k.lower() == target_lower]
+        for perf_key in matched:
+            _clear_performer(perf_key)
+        # Also clear in failed.json even if no history row existed
+        if include_failed and not matched:
+            for f_key in list(failed.keys()):
+                if f_key.lower() == target_lower:
+                    _clear_performer(f_key)
+
+    # Persist atomically
+    try:
+        save_json(HISTORY_PATH, history)
+        if include_failed:
+            save_json(FAILED_PATH, failed)
+    except Exception as e:
+        return jsonify({"error": f"write: {e}"}), 500
+
+    return jsonify({
+        "ok": True,
+        "performer": performer or "(all)",
+        "removed_history": removed_history,
+        "removed_failed": removed_failed,
+        "sites_filter": sites_filter,
+    })
 
 
 @app.route("/api/site-health")

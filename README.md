@@ -129,7 +129,6 @@ archivebate · recu.me
 > out. Harvestr has a **fast-fail pre-flight health check** that detects this
 > and routes around Coomer for you — and the new **Leakedzone + Fapello**
 > scrapers cover the same OnlyFans-archive content from unaffected infrastructure.
-> Full analysis: [`research/coomer_alternatives_2026.md`](research/coomer_alternatives_2026.md).
 
 ### Full list
 ```powershell
@@ -495,16 +494,6 @@ import. Most likely causes:
 - You set `HARVESTR_STREAMONITOR` to an invalid path (unset it or point
   at a real StreaMonitor checkout)
 - A Python version mismatch (StreaMonitor targets 3.10+; upgrade if on 3.8-3.9)
-
-## Research & reference
-
-- **[research/coomer_alternatives_2026.md](research/coomer_alternatives_2026.md)** —
-  deep dive on the Coomer BGP outage of April 2026, ranked alternatives with
-  reachability data, and the reverse-engineered Leakedzone video-URL
-  obfuscation scheme (cracked from scratch — documented with the decoder)
-- **[research/platforms_research.md](research/platforms_research.md)** —
-  per-platform auth model, API quirks, rate limits, and recommended
-  integration approach (X.com, OnlyFans, Fansly, Patreon, etc.)
 
 ## Coomer / Leakedzone / Fapello — which one runs first?
 

@@ -821,6 +821,91 @@ INDEX_HTML = r"""
   .bulkadd-actions {
     padding: 12px 20px; display: flex; align-items: center; gap: 8px;
   }
+
+  /* Live settings modal */
+  .modal-card.livesettings-card {
+    width: min(640px, 94vw); padding: 0; overflow: hidden;
+    background: var(--bg-2); border: 1px solid var(--border-2);
+    box-shadow: 0 24px 60px #00000090;
+    display: flex; flex-direction: column;
+    max-height: 88vh;
+  }
+  .livesettings-head {
+    padding: 18px 22px 14px; display: flex; align-items: flex-start; gap: 12px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #10182a, var(--bg-2));
+  }
+  .livesettings-head h3 {
+    margin: 0; font-size: 16.5px; font-weight: 700;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .livesettings-head p { margin: 4px 0 0; font-size: 12.5px; }
+  .livesettings-body {
+    padding: 8px 22px 18px; overflow-y: auto; flex: 1;
+  }
+  .ls-section {
+    padding: 14px 0; border-bottom: 1px solid var(--border);
+  }
+  .ls-section:last-child { border-bottom: none; }
+  .ls-section-title {
+    font-size: 10.5px; color: var(--text-3); font-weight: 600;
+    letter-spacing: 1px; text-transform: uppercase; margin-bottom: 10px;
+  }
+  .ls-row {
+    display: grid; grid-template-columns: 1fr auto;
+    align-items: center; gap: 12px; padding: 6px 0;
+    min-height: 32px;
+  }
+  .ls-row label {
+    font-size: 13px; color: var(--text); font-weight: 500;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .ls-row .ls-unit {
+    color: var(--text-3); font-size: 11px; font-weight: 400;
+    font-family: "JetBrains Mono", monospace;
+    padding: 1px 6px; background: var(--bg-3); border-radius: 4px;
+  }
+  .ls-row input[type="number"] {
+    width: 130px; text-align: right;
+    background: var(--bg); border: 1px solid var(--border-2); color: var(--text);
+    padding: 6px 10px; border-radius: 6px; font-size: 13px;
+    font-family: "JetBrains Mono", monospace;
+    transition: border-color .15s;
+  }
+  .ls-row input[type="number"]:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 2px #5cb8ff30;
+  }
+  .ls-row.switch-row { grid-template-columns: 1fr auto; }
+
+  /* iOS-style toggle */
+  .switch {
+    position: relative; display: inline-block; width: 40px; height: 22px;
+  }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .slider {
+    position: absolute; cursor: pointer; inset: 0;
+    background: var(--bg-3); border: 1px solid var(--border-2);
+    transition: .2s; border-radius: 22px;
+  }
+  .switch .slider::before {
+    content: ''; position: absolute; height: 16px; width: 16px;
+    left: 2px; bottom: 2px; background: var(--text-3);
+    transition: .2s; border-radius: 50%;
+  }
+  .switch input:checked + .slider {
+    background: linear-gradient(180deg, #3b8ce6, #2a6cb3);
+    border-color: var(--accent);
+  }
+  .switch input:checked + .slider::before {
+    transform: translateX(17px); background: #fff;
+  }
+  .livesettings-actions {
+    padding: 12px 22px; display: flex; align-items: center; gap: 8px;
+    border-top: 1px solid var(--border); background: var(--bg);
+  }
+  .livesettings-actions button { min-width: 110px; }
+  .livesettings-actions button.primary { margin-left: auto; }
   .file-btn {
     display: inline-flex; align-items: center; gap: 6px;
     padding: 7px 14px; background: var(--bg-3); color: var(--text);
@@ -1296,30 +1381,6 @@ INDEX_HTML = r"""
         <tr><td>CamSmut password</td><td><input id="cfg-cs-pass" type="password" placeholder=""/></td></tr>
       </table>
 
-      <h3 style="margin-top: 18px; margin-bottom: 8px; font-size: 13px; color: var(--text-2); text-transform: uppercase; letter-spacing: .5px;">
-        Live recording
-      </h3>
-      <table class="config-table">
-        <tr><td data-tip="Max file size per segment; the recorder rolls over when reached. 0 = no limit.">Break size (MB)</td>
-            <td><input id="cfg-live-break-mb" type="number" min="0" step="100" placeholder="0 = unlimited"/></td></tr>
-        <tr><td data-tip="Max recording length before forcing a new segment (minutes).">Break length (min)</td>
-            <td><input id="cfg-live-break-min" type="number" min="0" step="5" placeholder="0 = unlimited"/></td></tr>
-        <tr><td data-tip="How often to re-check each model's online status (seconds).">Poll interval (s)</td>
-            <td><input id="cfg-live-poll-int" type="number" min="5" step="5" placeholder="30"/></td></tr>
-        <tr><td data-tip="Delay after a failed stream before trying again (seconds).">Retry delay (s)</td>
-            <td><input id="cfg-live-retry-delay" type="number" min="1" step="5" placeholder="5"/></td></tr>
-        <tr><td data-tip="Max consecutive errors before auto-pausing the recorder. Reset on success.">Max errors → pause</td>
-            <td><input id="cfg-live-max-errors" type="number" min="1" step="1" placeholder="10"/></td></tr>
-        <tr><td data-tip="If the HLS download speed falls below this (KB/s), log a warning. 0 = no check.">Min speed (KB/s)</td>
-            <td><input id="cfg-live-min-speed" type="number" min="0" step="10" placeholder="0"/></td></tr>
-        <tr><td data-tip="Auto-resume paused recorders when they come online again.">Auto-resume on online</td>
-            <td><label style="display:inline-flex; gap:6px; align-items:center;"><input id="cfg-live-autoresume" type="checkbox"/>enabled</label></td></tr>
-        <tr><td data-tip="Convert recorded .ts to .mp4 automatically after each session.">Post-process to MP4</td>
-            <td><label style="display:inline-flex; gap:6px; align-items:center;"><input id="cfg-live-postprocess" type="checkbox"/>enabled</label></td></tr>
-        <tr><td data-tip="Keep only the last N recorded files per model; oldest auto-deleted.">Keep last N / model</td>
-            <td><input id="cfg-live-keep-n" type="number" min="0" step="1" placeholder="0 = keep all"/></td></tr>
-      </table>
-
       <div style="margin-top: 12px;">
         <button class="primary" onclick="saveSettings()">Save settings</button>
       </div>
@@ -1537,6 +1598,12 @@ INDEX_HTML = r"""
       <h2>
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
         Track a model
+        <button class="ghost" style="margin-left:auto; padding:5px 10px; font-size:12px;"
+                onclick="openLiveSettings()" data-tip="Live recording settings"
+                aria-label="Open live settings">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          Settings
+        </button>
       </h2>
       <div class="add-row">
         <input id="live-new-username" type="text" placeholder="Model username"
@@ -1620,6 +1687,93 @@ INDEX_HTML = r"""
     <div class="dialog-actions">
       <button class="ghost" onclick="dialogCancel()" id="dialog-cancel-btn">Cancel</button>
       <button class="primary" onclick="dialogConfirm()" id="dialog-ok-btn">OK</button>
+    </div>
+  </div>
+</div>
+
+<!-- Live settings modal (Live-tab only) -->
+<div class="modal-backdrop" id="livesettings-modal" onclick="closeLiveSettings(event)"
+     role="dialog" aria-modal="true" aria-labelledby="livesettings-title">
+  <div class="modal-card livesettings-card" onclick="event.stopPropagation()">
+    <div class="livesettings-head">
+      <div>
+        <h3 id="livesettings-title">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+               style="vertical-align: -2px; color: var(--accent);">
+            <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+          Live recording settings
+        </h3>
+        <p class="muted" style="font-size: 12px; margin: 3px 0 0 0;">
+          Applied to new recordings on the next poll cycle. No restart needed.
+        </p>
+      </div>
+      <button class="xs ghost" onclick="closeLiveSettings()" aria-label="Close">✕</button>
+    </div>
+
+    <div class="livesettings-body">
+      <div class="ls-section">
+        <div class="ls-section-title">Segmentation</div>
+        <div class="ls-row">
+          <label for="cfg-live-break-mb" data-tip="Max file size per segment. Recorder rolls to a new file when reached.">Break size
+            <span class="ls-unit">MB</span></label>
+          <input id="cfg-live-break-mb" type="number" min="0" step="100" placeholder="0 = unlimited"/>
+        </div>
+        <div class="ls-row">
+          <label for="cfg-live-break-min" data-tip="Max recording length before forcing a new segment.">Break length
+            <span class="ls-unit">min</span></label>
+          <input id="cfg-live-break-min" type="number" min="0" step="5" placeholder="0 = unlimited"/>
+        </div>
+      </div>
+
+      <div class="ls-section">
+        <div class="ls-section-title">Network</div>
+        <div class="ls-row">
+          <label for="cfg-live-poll-int" data-tip="How often to re-check each model's online status.">Poll interval
+            <span class="ls-unit">s</span></label>
+          <input id="cfg-live-poll-int" type="number" min="5" step="5" placeholder="30"/>
+        </div>
+        <div class="ls-row">
+          <label for="cfg-live-retry-delay" data-tip="Delay after a failed stream before trying again.">Retry delay
+            <span class="ls-unit">s</span></label>
+          <input id="cfg-live-retry-delay" type="number" min="1" step="5" placeholder="5"/>
+        </div>
+        <div class="ls-row">
+          <label for="cfg-live-min-speed" data-tip="If the HLS download speed falls below this, log a warning. 0 = no check.">Min speed
+            <span class="ls-unit">KB/s</span></label>
+          <input id="cfg-live-min-speed" type="number" min="0" step="10" placeholder="0"/>
+        </div>
+      </div>
+
+      <div class="ls-section">
+        <div class="ls-section-title">Reliability</div>
+        <div class="ls-row">
+          <label for="cfg-live-max-errors" data-tip="Max consecutive errors before auto-pausing. Reset on success.">Max errors → pause</label>
+          <input id="cfg-live-max-errors" type="number" min="1" step="1" placeholder="10"/>
+        </div>
+        <div class="ls-row switch-row">
+          <label for="cfg-live-autoresume" data-tip="Auto-resume paused recorders when they come online again.">Auto-resume on online</label>
+          <label class="switch"><input id="cfg-live-autoresume" type="checkbox"/><span class="slider"></span></label>
+        </div>
+      </div>
+
+      <div class="ls-section">
+        <div class="ls-section-title">Post-processing</div>
+        <div class="ls-row switch-row">
+          <label for="cfg-live-postprocess" data-tip="Convert .ts to .mp4 automatically after each session.">Post-process to MP4</label>
+          <label class="switch"><input id="cfg-live-postprocess" type="checkbox"/><span class="slider"></span></label>
+        </div>
+        <div class="ls-row">
+          <label for="cfg-live-keep-n" data-tip="Keep only the last N recorded files per model. 0 = keep all.">Keep last N per model</label>
+          <input id="cfg-live-keep-n" type="number" min="0" step="1" placeholder="0 = keep all"/>
+        </div>
+      </div>
+    </div>
+
+    <div class="livesettings-actions">
+      <button class="ghost" onclick="closeLiveSettings()">Cancel</button>
+      <button class="primary" onclick="saveLiveSettings()">Save live settings</button>
     </div>
   </div>
 </div>
@@ -1931,7 +2085,6 @@ async function loadConfig() {
   g('cfg-live-min-speed').value     = live.min_speed_kbps ?? '';
   g('cfg-live-autoresume').checked  = !!(live.auto_resume ?? true);
   g('cfg-live-postprocess').checked = !!(live.post_process_mp4 ?? false);
-  g('cfg-live-keep-n').value        = live.keep_last_n ?? '';
   // Populate the "reset history" performer dropdown in the Danger zone
   const rsel = g('reset-performer-select');
   if (rsel) {
@@ -1943,6 +2096,52 @@ async function loadConfig() {
   }
   renderPerformers();
   renderSites();
+}
+
+// ── Live settings modal ────────────────────────────────────────────────
+function openLiveSettings() {
+  // Re-populate from the latest config (loadConfig has already run at boot)
+  const g = (id) => document.getElementById(id);
+  const live = (_config && _config.live) || {};
+  g('cfg-live-break-mb').value      = live.break_size_mb ?? '';
+  g('cfg-live-break-min').value     = live.break_length_min ?? '';
+  g('cfg-live-poll-int').value      = live.poll_interval_s ?? '';
+  g('cfg-live-retry-delay').value   = live.retry_delay_s ?? '';
+  g('cfg-live-max-errors').value    = live.max_errors ?? '';
+  g('cfg-live-min-speed').value     = live.min_speed_kbps ?? '';
+  g('cfg-live-autoresume').checked  = !!(live.auto_resume ?? true);
+  g('cfg-live-postprocess').checked = !!(live.post_process_mp4 ?? false);
+  g('cfg-live-keep-n').value        = live.keep_last_n ?? '';
+  document.getElementById('livesettings-modal').classList.add('show');
+  setTimeout(() => g('cfg-live-break-mb').focus(), 40);
+}
+function closeLiveSettings(e) {
+  if (e && e.target && e.target.id !== 'livesettings-modal') return;
+  document.getElementById('livesettings-modal').classList.remove('show');
+}
+async function saveLiveSettings() {
+  const g = (id) => document.getElementById(id);
+  const liveCfg = {
+    break_size_mb:    parseInt(g('cfg-live-break-mb').value)    || 0,
+    break_length_min: parseInt(g('cfg-live-break-min').value)   || 0,
+    poll_interval_s:  parseInt(g('cfg-live-poll-int').value)    || 30,
+    retry_delay_s:    parseInt(g('cfg-live-retry-delay').value) || 5,
+    max_errors:       parseInt(g('cfg-live-max-errors').value)  || 10,
+    min_speed_kbps:   parseInt(g('cfg-live-min-speed').value)   || 0,
+    auto_resume:      !!g('cfg-live-autoresume').checked,
+    post_process_mp4: !!g('cfg-live-postprocess').checked,
+    keep_last_n:      parseInt(g('cfg-live-keep-n').value)      || 0,
+  };
+  const merged = {..._config, live: liveCfg};
+  try {
+    await api('/api/config', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(merged),
+    });
+    _config = merged;
+    toast('Live settings saved', 'success');
+    closeLiveSettings();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
 // ── History reset (danger zone) ───────────────────────────────────────
@@ -2153,17 +2352,9 @@ async function saveSettings() {
     download_proxy: g('cfg-proxy').value,
     camsmut_username: g('cfg-cs-user').value,
     camsmut_password: g('cfg-cs-pass').value,
-    live: {
-      break_size_mb:   parseInt(g('cfg-live-break-mb').value)  || 0,
-      break_length_min:parseInt(g('cfg-live-break-min').value) || 0,
-      poll_interval_s: parseInt(g('cfg-live-poll-int').value)  || 30,
-      retry_delay_s:   parseInt(g('cfg-live-retry-delay').value) || 5,
-      max_errors:      parseInt(g('cfg-live-max-errors').value)|| 10,
-      min_speed_kbps:  parseInt(g('cfg-live-min-speed').value) || 0,
-      auto_resume:     !!g('cfg-live-autoresume').checked,
-      post_process_mp4:!!g('cfg-live-postprocess').checked,
-      keep_last_n:     parseInt(g('cfg-live-keep-n').value)    || 0,
-    },
+    // Live settings: preserved as-is (edited via the Live tab's gear modal,
+    // not from this Archive-side Settings panel).
+    live: _config.live || {},
   };
   try {
     await api('/api/config', {
@@ -2682,6 +2873,12 @@ function renderLiveModels() {
           Start
         </button>`;
     }
+    // Folder — opens downloads/_live/<user> [SITE]/ in explorer
+    actions += `
+      <button class="ghost icon-only" onclick="liveOpenFolder('${u}','${escapeHtml(m.site_slug || m.site)}')"
+              data-tip="Open recordings folder on disk" aria-label="Open folder">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+      </button>`;
     actions += `
       <button class="ghost icon-only" onclick="liveRemove('${u}','${s}')"
               data-tip="Remove from tracking (X)" aria-label="Remove">
@@ -2807,6 +3004,22 @@ async function livePause(username, site) {
     toast(`Paused ${username}`);
     setTimeout(liveRefresh, 400);
   } catch(e) { toast('Error: '+e.message, 'error'); }
+}
+async function liveOpenFolder(username, siteSlug) {
+  // Recordings live at downloads/_live/<username> [SLUG]/
+  const folder = `_live/${username} [${siteSlug}]`;
+  try {
+    await api('/api/open-folder', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({path: folder})});
+    toast(`Opened folder for ${username}`);
+  } catch(e) { toast('Folder not found — no recordings yet?', 'error'); }
+}
+async function openLocalPath(path) {
+  // Generic "open this file/folder on disk" helper used across the UI.
+  try {
+    await api('/api/open-folder', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({path})});
+  } catch(e) { toast(e.message || 'Could not open', 'error'); }
 }
 async function liveToggleAll(on) {
   if (!await confirmDialog(
@@ -3539,6 +3752,53 @@ def api_history():
 @app.route("/api/failed")
 def api_failed():
     return jsonify(load_json(FAILED_PATH))
+
+
+@app.route("/api/open-folder", methods=["POST"])
+def api_open_folder():
+    """Open a folder (or the parent of a file) in the native file explorer.
+
+    Body: {"path": "<absolute or relative-to-downloads path>"}
+
+    Security: we refuse to open anything outside DOWNLOADS_DIR or SCRIPT_DIR
+    so a malicious request can't navigate your whole filesystem."""
+    body = request.get_json(silent=True) or {}
+    raw = (body.get("path") or "").strip()
+    if not raw:
+        return jsonify({"error": "path required"}), 400
+    try:
+        p = Path(raw)
+        if not p.is_absolute():
+            # Relative → interpret under downloads/
+            p = DOWNLOADS_DIR / raw
+        p = p.resolve()
+    except Exception as e:
+        return jsonify({"error": f"bad path: {e}"}), 400
+
+    # Security: stay within our downloads tree (or script dir)
+    roots = [DOWNLOADS_DIR.resolve(), SCRIPT_DIR.resolve()]
+    if not any(str(p).lower().startswith(str(r).lower()) for r in roots):
+        return jsonify({"error": "path outside downloads directory"}), 403
+
+    # If the path doesn't exist but a parent does, open the nearest parent
+    target = p if p.exists() else (p.parent if p.parent.exists() else None)
+    if target is None:
+        return jsonify({"error": f"not found: {p}"}), 404
+
+    # If target is a file, open its parent folder (and highlight it on Windows)
+    try:
+        if sys.platform == "win32":
+            if target.is_file():
+                subprocess.Popen(["explorer", "/select,", str(target)])
+            else:
+                subprocess.Popen(["explorer", str(target)])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(target if target.is_dir() else target.parent)])
+        else:
+            subprocess.Popen(["xdg-open", str(target if target.is_dir() else target.parent)])
+    except Exception as e:
+        return jsonify({"error": f"open: {e}"}), 500
+    return jsonify({"ok": True, "opened": str(target)})
 
 
 @app.route("/api/history/reset", methods=["POST"])

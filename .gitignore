@@ -56,3 +56,13 @@ Thumbs.db
 
 # Embedded Tor runtime cache (tor_helper.py writes consensus/microdesc here)
 _tor_data/
+
+# Local research / notes / assistant scratch — not shipped with the project
+research/
+**/.claude/
+CLAUDE.md
+claude_*.md
+*.scratch.md
+*.notes.md
+.memory/
+.claude/

@@ -2503,71 +2503,28 @@ class CamSmut(SiteScraper):
         if not voe_url or "http" not in voe_url:
             return False
 
-        # Delegate to yt-dlp for m3u8 resolution. camsmut has rotated through
-        # multiple embed hosts (VOE.sx, playmogo.com, doodstream, etc.);
-        # yt-dlp covers most. If yt-dlp rejects it as "unsupported URL",
-        # we mark the ref `needs_browser` so the user knows to run their
-        # Playwright-based downloader for this one.
+        # Multi-tier embed extraction: host-specific no-browser → yt-dlp →
+        # Playwright headless Chrome. Replaces the previous NEEDS-BROWSER
+        # skip path — we now actually extract everything inline.
         try:
-            import yt_dlp
-            with yt_dlp.YoutubeDL({
-                "quiet": True, "no_warnings": True,
-                "skip_download": True,
-                "extract_flat": False,
-                # Some embed hosts require browser TLS fingerprint; yt-dlp
-                # can use curl_cffi if we ask nicely.
-                "extractor_args": {"generic": {"impersonate": ["chrome131"]}},
-            }) as ydl:
-                try:
-                    info = ydl.extract_info(voe_url, download=False)
-                except yt_dlp.utils.DownloadError as e:
-                    msg = str(e).lower()
-                    browser_needed_markers = (
-                        "unsupported url",
-                        "no video formats",
-                        "cloudflare",
-                        "403",
-                        "anti-bot challenge",
-                    )
-                    if any(mk in msg for mk in browser_needed_markers):
-                        self.log.debug(
-                            f"  [{self.NAME}] {video.video_id}: embed host "
-                            f"{voe_url.split('/')[2]} needs a real browser "
-                            f"(JS / Cloudflare challenge); yt-dlp can't extract. "
-                            f"Use the standalone Playwright downloader at "
-                            f"C:/Users/<you>/Documents/Scripts/Downloaders/camsmut/"
-                        )
-                        video.stream_kind = "needs_browser"
-                    else:
-                        self.log.debug(f"  [{self.NAME}] yt-dlp error: {e}")
-                    return False
-                if not info:
-                    return False
-                # Pick the best format
-                fmts = info.get("formats") or []
-                hls = [f for f in fmts if (f.get("protocol") or "").startswith("m3u8")]
-                mp4 = [f for f in fmts if f.get("ext") == "mp4" and f.get("url")]
-                chosen = None
-                if hls:
-                    chosen = max(hls, key=lambda f: f.get("tbr") or f.get("height") or 0)
-                elif mp4:
-                    chosen = max(mp4, key=lambda f: f.get("tbr") or f.get("height") or 0)
-                elif info.get("url"):
-                    chosen = {"url": info["url"], "protocol": "https"}
-                if not chosen or not chosen.get("url"):
-                    return False
-                video.stream_url = chosen["url"]
-                video.stream_kind = "hls" if "m3u8" in (chosen.get("protocol") or "") or ".m3u8" in chosen["url"] else "mp4"
-                hdrs = {"User-Agent": USER_AGENT, "Referer": voe_url}
-                http_hdrs = chosen.get("http_headers") or {}
-                hdrs.update(http_hdrs)
-                video.stream_headers = hdrs
-                if info.get("title") and not video.title:
-                    video.title = info["title"]
-                return True
+            from embed_extractors import extract_embed_stream
         except Exception as e:
-            self.log.debug(f"  [{self.NAME}] yt-dlp VOE resolve: {e}")
+            self.log.warning(f"  [{self.NAME}] embed_extractors unavailable: {e}")
             return False
+
+        res = extract_embed_stream(voe_url, log=self.log, allow_browser=True)
+        if not res:
+            self.log.debug(f"  [{self.NAME}] {video.video_id}: all extractor tiers "
+                           f"failed for {voe_url.split('/')[2]} — marking skip")
+            # Still mark skip (not fail) so we can retry on next run when
+            # the embed host updates.
+            video.stream_kind = "needs_browser"
+            return False
+        video.stream_url = res.stream_url
+        video.stream_kind = res.stream_kind
+        video.stream_headers = dict(res.headers)
+        self.log.debug(f"  [{self.NAME}] {video.video_id}: extracted via {res.source}")
+        return True
 
 
 # ── Fapello.com (OF/IG/Snap archive, deterministic numbered posts) ───────────

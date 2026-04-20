@@ -924,7 +924,89 @@ INDEX_HTML = r"""
   .live-card .state-label.text-3 { color: var(--text-3); }
   .live-card .meta { font-size: 11.5px; color: var(--text-3); font-family: "JetBrains Mono", monospace; }
   .live-card .actions { display: flex; gap: 6px; margin-top: 12px; }
-  .live-card .actions button { flex: 1; }
+  .live-card .actions button { flex: 1; padding: 6px 8px; }
+  .live-card .actions button.icon-only { flex: 0 0 34px; padding: 6px; }
+  .live-card .actions button svg { width: 12px; height: 12px; }
+
+  /* Thumbnail header — shown when the site returned an avatar/preview */
+  .live-card .hero {
+    margin: -14px -16px 10px -16px;
+    height: 90px;
+    background-size: cover; background-position: center;
+    background-color: #0e1421;
+    position: relative; overflow: hidden;
+  }
+  .live-card .hero::after {
+    content: ''; position: absolute; inset: 0;
+    background: linear-gradient(180deg, transparent 30%, #10141c 100%);
+  }
+  .live-card .hero.small { height: 52px; }
+
+  /* Badges row under status */
+  .live-card .badges {
+    display: flex; flex-wrap: wrap; gap: 4px 5px; margin-bottom: 8px;
+  }
+  .live-card .badge {
+    font-size: 10.5px; padding: 1px 7px; border-radius: 11px;
+    background: #121826; color: var(--text-2); border: 1px solid var(--border);
+    display: inline-flex; align-items: center; gap: 3px; line-height: 1.5;
+  }
+  .live-card .badge.country { background: #0e1e2e; color: #7fd0ff; }
+  .live-card .badge.age { background: #1e1830; color: #c8a8ff; }
+  .live-card .badge.language { background: #11241e; color: #5ee2a6; }
+  .live-card .badge.viewers { background: #2a1211; color: #ff9595; }
+  .live-card .badge.duration { background: #13171f; color: #ffc878; }
+  .live-card .badge .mini-dot {
+    width: 5px; height: 5px; border-radius: 50%; display: inline-block;
+  }
+  .live-card .tags {
+    display: flex; flex-wrap: wrap; gap: 3px; margin: 0 0 8px 0;
+    font-size: 10.5px; line-height: 1.4;
+  }
+  .live-card .tag-chip {
+    background: #0b1322; border: 1px solid #1c2438;
+    color: #7aa4cf; padding: 1px 6px; border-radius: 10px;
+  }
+
+  /* Freq/history row */
+  .live-card .freq-grid {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 4px 10px; font-size: 11px; margin-bottom: 10px;
+    padding: 7px 9px; background: #0b1320; border-radius: 6px;
+    border: 1px solid #141c2d;
+  }
+  .live-card .freq-grid .k {
+    color: var(--text-3); font-family: "JetBrains Mono", monospace; font-size: 10px;
+    text-transform: uppercase; letter-spacing: .3px;
+  }
+  .live-card .freq-grid .v {
+    color: var(--text); text-align: right;
+    font-family: "JetBrains Mono", monospace; font-size: 11px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .live-card .freq-grid .v.good    { color: var(--good); }
+  .live-card .freq-grid .v.accent  { color: var(--accent); }
+  .live-card .freq-grid .v.warn    { color: var(--warn); }
+
+  .live-card.error-state { border-color: #6b2a2a; }
+  .live-card.paused-state { border-color: #5a4a1e; }
+  .live-card.paused-state::after {
+    content: 'PAUSED'; position: absolute; top: 10px; right: 12px;
+    font-size: 9.5px; font-weight: 700; letter-spacing: 1px;
+    color: var(--warn); background: #1f1508; padding: 2px 7px;
+    border-radius: 4px; border: 1px solid #5a4a1e;
+  }
+  .live-card.live-now {
+    background: linear-gradient(180deg, #0d2916, #10141c);
+    border-color: #2f7d42;
+  }
+  .live-card.live-now::after {
+    content: '● LIVE'; position: absolute; top: 10px; right: 12px;
+    font-size: 10px; font-weight: 700; letter-spacing: .5px;
+    color: #5ee2a6; background: #072416; padding: 2px 8px;
+    border-radius: 4px; border: 1px solid #145a3b;
+    animation: pulse-dot 1.5s ease-in-out infinite;
+  }
 
   /* Stat-box accent variant */
   .stat-box.accent::before { background: var(--accent); }
@@ -1176,6 +1258,31 @@ INDEX_HTML = r"""
         <tr><td>CamSmut user</td><td><input id="cfg-cs-user" type="text" placeholder="(empty = skip camsmut)"/></td></tr>
         <tr><td>CamSmut password</td><td><input id="cfg-cs-pass" type="password" placeholder=""/></td></tr>
       </table>
+
+      <h3 style="margin-top: 18px; margin-bottom: 8px; font-size: 13px; color: var(--text-2); text-transform: uppercase; letter-spacing: .5px;">
+        Live recording
+      </h3>
+      <table class="config-table">
+        <tr><td data-tip="Max file size per segment; the recorder rolls over when reached. 0 = no limit.">Break size (MB)</td>
+            <td><input id="cfg-live-break-mb" type="number" min="0" step="100" placeholder="0 = unlimited"/></td></tr>
+        <tr><td data-tip="Max recording length before forcing a new segment (minutes).">Break length (min)</td>
+            <td><input id="cfg-live-break-min" type="number" min="0" step="5" placeholder="0 = unlimited"/></td></tr>
+        <tr><td data-tip="How often to re-check each model's online status (seconds).">Poll interval (s)</td>
+            <td><input id="cfg-live-poll-int" type="number" min="5" step="5" placeholder="30"/></td></tr>
+        <tr><td data-tip="Delay after a failed stream before trying again (seconds).">Retry delay (s)</td>
+            <td><input id="cfg-live-retry-delay" type="number" min="1" step="5" placeholder="5"/></td></tr>
+        <tr><td data-tip="Max consecutive errors before auto-pausing the recorder. Reset on success.">Max errors → pause</td>
+            <td><input id="cfg-live-max-errors" type="number" min="1" step="1" placeholder="10"/></td></tr>
+        <tr><td data-tip="If the HLS download speed falls below this (KB/s), log a warning. 0 = no check.">Min speed (KB/s)</td>
+            <td><input id="cfg-live-min-speed" type="number" min="0" step="10" placeholder="0"/></td></tr>
+        <tr><td data-tip="Auto-resume paused recorders when they come online again.">Auto-resume on online</td>
+            <td><label style="display:inline-flex; gap:6px; align-items:center;"><input id="cfg-live-autoresume" type="checkbox"/>enabled</label></td></tr>
+        <tr><td data-tip="Convert recorded .ts to .mp4 automatically after each session.">Post-process to MP4</td>
+            <td><label style="display:inline-flex; gap:6px; align-items:center;"><input id="cfg-live-postprocess" type="checkbox"/>enabled</label></td></tr>
+        <tr><td data-tip="Keep only the last N recorded files per model; oldest auto-deleted.">Keep last N / model</td>
+            <td><input id="cfg-live-keep-n" type="number" min="0" step="1" placeholder="0 = keep all"/></td></tr>
+      </table>
+
       <div style="margin-top: 12px;">
         <button class="primary" onclick="saveSettings()">Save settings</button>
       </div>
@@ -1369,10 +1476,8 @@ INDEX_HTML = r"""
         <select id="live-new-site" aria-label="Cam site">
           <option value="">— Site —</option>
         </select>
-        <input id="live-new-roomid" type="text" placeholder="Room ID"
-               style="flex: 0 0 140px; display: none;"
-               aria-label="Room ID"/>
-        <button class="primary" onclick="liveAdd()" data-tip="Start tracking this model">
+        <button class="primary" id="live-add-btn" onclick="liveAdd()"
+                data-tip="Auto-resolves the room ID from username">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
           Track
         </button>
@@ -1747,6 +1852,17 @@ async function loadConfig() {
   g('cfg-proxy').value = _config.download_proxy || '';
   g('cfg-cs-user').value = _config.camsmut_username || '';
   g('cfg-cs-pass').value = _config.camsmut_password || '';
+  // Live recording settings
+  const live = _config.live || {};
+  g('cfg-live-break-mb').value      = live.break_size_mb ?? '';
+  g('cfg-live-break-min').value     = live.break_length_min ?? '';
+  g('cfg-live-poll-int').value      = live.poll_interval_s ?? '';
+  g('cfg-live-retry-delay').value   = live.retry_delay_s ?? '';
+  g('cfg-live-max-errors').value    = live.max_errors ?? '';
+  g('cfg-live-min-speed').value     = live.min_speed_kbps ?? '';
+  g('cfg-live-autoresume').checked  = !!(live.auto_resume ?? true);
+  g('cfg-live-postprocess').checked = !!(live.post_process_mp4 ?? false);
+  g('cfg-live-keep-n').value        = live.keep_last_n ?? '';
   renderPerformers();
   renderSites();
 }
@@ -1898,6 +2014,17 @@ async function saveSettings() {
     download_proxy: g('cfg-proxy').value,
     camsmut_username: g('cfg-cs-user').value,
     camsmut_password: g('cfg-cs-pass').value,
+    live: {
+      break_size_mb:   parseInt(g('cfg-live-break-mb').value)  || 0,
+      break_length_min:parseInt(g('cfg-live-break-min').value) || 0,
+      poll_interval_s: parseInt(g('cfg-live-poll-int').value)  || 30,
+      retry_delay_s:   parseInt(g('cfg-live-retry-delay').value) || 5,
+      max_errors:      parseInt(g('cfg-live-max-errors').value)|| 10,
+      min_speed_kbps:  parseInt(g('cfg-live-min-speed').value) || 0,
+      auto_resume:     !!g('cfg-live-autoresume').checked,
+      post_process_mp4:!!g('cfg-live-postprocess').checked,
+      keep_last_n:     parseInt(g('cfg-live-keep-n').value)    || 0,
+    },
   };
   try {
     await api('/api/config', {
@@ -2251,10 +2378,8 @@ async function liveLoadSites() {
     sel.onchange = () => {
       const opt = sel.options[sel.selectedIndex];
       const needsRoomId = opt && opt.dataset.needsRoomId === '1';
-      const rin = document.getElementById('live-new-roomid');
-      rin.style.display = needsRoomId ? '' : 'none';
       document.getElementById('live-site-hint').textContent = needsRoomId
-        ? 'This site requires a numeric room ID — find it in the stream page URL.'
+        ? "We'll auto-resolve the room ID from the username — no extra input needed."
         : '';
     };
   } catch(e) {
@@ -2333,9 +2458,99 @@ function renderLiveModels() {
 
   root.innerHTML = models.map(m => {
     const dot = `<span class="state-dot ${m.status_color}" aria-hidden="true"></span>`;
-    const recClass = m.recording ? 'recording' : '';
+    const cls = [];
+    if (m.recording) cls.push('recording');
+    if (m.status === 'PUBLIC') cls.push('live-now');
+    if (m.status === 'ERROR' || m.status === 'NOTEXIST' || m.status === 'DELETED') cls.push('error-state');
+    if (!m.running && (m.status === 'OFFLINE' || m.status === 'NOTRUNNING')) cls.push('paused-state');
     const size = m.size_bytes ? bytesHuman(m.size_bytes) : '—';
-    return `<div class="live-card ${recClass}">
+
+    // Hero thumbnail
+    const hero = m.thumb_url || m.avatar_url;
+    const heroHtml = hero
+      ? `<div class="hero${m.avatar_url && !m.thumb_url ? ' small' : ''}"
+              style="background-image: url('${escapeHtml(hero)}');"></div>`
+      : '';
+
+    // Badges: country / age / gender / language / viewers / duration
+    const badges = [];
+    if (m.country) badges.push(`<span class="badge country" data-tip="Country">${_flagEmoji(m.country)} ${escapeHtml(m.country)}</span>`);
+    if (m.gender) badges.push(`<span class="badge" data-tip="Gender">${_genderIcon(m.gender)} ${escapeHtml(m.gender)}</span>`);
+    if (m.age) badges.push(`<span class="badge age" data-tip="Age">${m.age}</span>`);
+    if (m.language) badges.push(`<span class="badge language">${escapeHtml(m.language)}</span>`);
+    if (m.spectators != null && m.status === 'PUBLIC')
+      badges.push(`<span class="badge viewers" data-tip="Viewers now">👁 ${numHuman(m.spectators)}</span>`);
+    if (m.stream_duration_s && m.status === 'PUBLIC')
+      badges.push(`<span class="badge duration" data-tip="Streaming for">${secsHuman(m.stream_duration_s)}</span>`);
+    const badgesHtml = badges.length
+      ? `<div class="badges">${badges.join('')}</div>` : '';
+
+    // Tags (top 5)
+    const tags = (m.tags || []).slice(0, 5);
+    const tagsHtml = tags.length
+      ? `<div class="tags">${tags.map(t =>
+          `<span class="tag-chip">#${escapeHtml(t)}</span>`).join('')}</div>`
+      : '';
+
+    // Frequency / history
+    const lastOn = m.last_online_ts ? relTime(m.last_online_ts) : '—';
+    const nextPred = m.next_predicted_ts ? relTime(m.next_predicted_ts) : '—';
+    const hoursW = m.online_hours_7d ? m.online_hours_7d.toFixed(1) + 'h' : '—';
+    const sessW = m.online_sessions_7d || 0;
+    const avgMin = m.avg_session_minutes ? m.avg_session_minutes + 'm' : '—';
+    const lastOnClass = m.last_online_ts ? 'good' : '';
+    const freqGrid = (m.last_online_ts || m.next_predicted_ts || sessW > 0)
+      ? `<div class="freq-grid">
+          <span class="k">Last online</span>
+          <span class="v ${lastOnClass}" title="${escapeHtml(m.last_online_ts || '')}">${lastOn}</span>
+          <span class="k">Next (pred.)</span>
+          <span class="v accent" title="${escapeHtml(m.next_predicted_ts || '')}">${nextPred}</span>
+          <span class="k">Sessions/7d</span>
+          <span class="v">${sessW}</span>
+          <span class="k">Hours/7d</span>
+          <span class="v">${hoursW}</span>
+          <span class="k">Avg session</span>
+          <span class="v">${avgMin}</span>
+          <span class="k">Total recorded</span>
+          <span class="v good">${size}</span>
+        </div>`
+      : '';
+
+    // Actions: state-appropriate
+    // running + recording → Pause (stops recording, keeps polling) + Stop
+    // running + not recording (polling) → Pause + Stop
+    // not running → Resume (= Start polling)
+    const u = escapeHtml(m.username);
+    const s = escapeHtml(m.site);
+    let actions = '';
+    if (m.running) {
+      actions = `
+        <button class="warn" onclick="livePause('${u}','${s}')"
+                data-tip="Pause polling (can resume later)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="4" x2="6" y2="20"/><line x1="18" y1="4" x2="18" y2="20"/></svg>
+          Pause
+        </button>
+        <button class="danger" onclick="liveStop('${u}','${s}')"
+                data-tip="Stop + close any active recording">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="1"/></svg>
+          Stop
+        </button>`;
+    } else {
+      actions = `
+        <button class="success" onclick="liveStart('${u}','${s}')"
+                data-tip="Resume polling">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Start
+        </button>`;
+    }
+    actions += `
+      <button class="ghost icon-only" onclick="liveRemove('${u}','${s}')"
+              data-tip="Remove from tracking (X)" aria-label="Remove">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>`;
+
+    return `<div class="live-card ${cls.join(' ')}">
+      ${heroHtml}
       <div class="top">
         <span class="username" title="${escapeHtml(m.username)}">${escapeHtml(m.username)}</span>
         <span class="site-chip" data-tip="Site slug: ${escapeHtml(m.site_slug)}">${escapeHtml(m.site)}</span>
@@ -2344,34 +2559,76 @@ function renderLiveModels() {
         ${dot}
         <span class="state-label ${m.status_color}">${escapeHtml(m.status_label)}</span>
         <span style="flex:1"></span>
-        <span class="meta" data-tip="Recorded size">${size}</span>
+        ${m.followers != null ? `<span class="meta" data-tip="Followers">♥ ${numHuman(m.followers)}</span>` : ''}
       </div>
-      ${m.room_id ? `<div class="meta">room ${escapeHtml(m.room_id)}</div>` : ''}
-      ${m.country ? `<div class="meta">${escapeHtml(m.country)}${m.gender ? ' · '+escapeHtml(m.gender) : ''}</div>` : ''}
-      <div class="actions">
-        ${m.running
-          ? `<button class="danger" onclick="liveStop('${m.username}','${m.site}')">■ Stop</button>`
-          : `<button class="success" onclick="liveStart('${m.username}','${m.site}')">▶ Start</button>`}
-        <button class="ghost" onclick="liveRemove('${m.username}','${m.site}')"
-                data-tip="Remove from tracking" aria-label="Remove">✕</button>
-      </div>
+      ${badgesHtml}
+      ${tagsHtml}
+      ${freqGrid}
+      <div class="actions">${actions}</div>
     </div>`;
   }).join('');
+}
+
+function _flagEmoji(cc) {
+  if (!cc || cc.length !== 2) return '🌐';
+  const base = 0x1F1E6;
+  const A = 'A'.charCodeAt(0);
+  return String.fromCodePoint(base + (cc.toUpperCase().charCodeAt(0) - A))
+       + String.fromCodePoint(base + (cc.toUpperCase().charCodeAt(1) - A));
+}
+function _genderIcon(g) {
+  const s = (g || '').toLowerCase();
+  return s.startsWith('f') ? '♀'
+       : s.startsWith('m') ? '♂'
+       : s.startsWith('t') ? '⚧'
+       : s.startsWith('c') || s.startsWith('b') ? '⚤'
+       : '';
+}
+
+function numHuman(n) {
+  if (n == null) return '';
+  if (n >= 1e6) return (n/1e6).toFixed(1).replace(/\.0$/,'') + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1).replace(/\.0$/,'') + 'k';
+  return '' + Math.round(n);
+}
+
+function relTime(iso) {
+  if (!iso) return '—';
+  const now = Date.now();
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return '—';
+  const diffSec = Math.floor((t - now) / 1000);
+  const future = diffSec > 0;
+  const d = Math.abs(diffSec);
+  let out;
+  if (d < 60) out = 'now';
+  else if (d < 3600) out = Math.floor(d/60) + 'm';
+  else if (d < 86400) out = Math.floor(d/3600) + 'h';
+  else if (d < 7*86400) out = Math.floor(d/86400) + 'd';
+  else out = Math.floor(d/86400) + 'd';
+  return future ? 'in ' + out : out + ' ago';
 }
 
 async function liveAdd() {
   const username = document.getElementById('live-new-username').value.trim();
   const site = document.getElementById('live-new-site').value;
-  const roomId = document.getElementById('live-new-roomid').value.trim() || null;
   if (!username || !site) { toast('Pick a site + enter username', 'error'); return; }
+  const btn = document.getElementById('live-add-btn');
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Resolving…';
   try {
     await api('/api/live/add', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({username, site, room_id: roomId})});
-    toast(`Added ${username} [${site}]`, 'success');
+      body: JSON.stringify({username, site})});
+    toast(`Tracking ${username} [${site}]`, 'success');
     document.getElementById('live-new-username').value = '';
-    document.getElementById('live-new-roomid').value = '';
     liveRefresh();
-  } catch(e) { toast('Error: '+e.message, 'error'); }
+  } catch(e) {
+    toast('Could not add: '+e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = orig;
+  }
 }
 async function liveRemove(username, site) {
   if (!await confirmDialog(
@@ -2398,6 +2655,17 @@ async function liveStop(username, site) {
     await api('/api/live/stop', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({username, site})});
     toast(`Stopped ${username}`);
+    setTimeout(liveRefresh, 400);
+  } catch(e) { toast('Error: '+e.message, 'error'); }
+}
+async function livePause(username, site) {
+  // Soft-stop: keep the model in the tracking list but stop polling.
+  // Resume via the Start button. Backend just calls stop() without
+  // removing — same endpoint, different UX framing.
+  try {
+    await api('/api/live/pause', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({username, site})});
+    toast(`Paused ${username}`);
     setTimeout(liveRefresh, 400);
   } catch(e) { toast('Error: '+e.message, 'error'); }
 }
@@ -2674,10 +2942,10 @@ function openLiveBulkAdd() {
   _bulkaddMode = 'live';
   document.getElementById('bulkadd-title').textContent = 'Bulk add live models';
   document.getElementById('bulkadd-sub').innerHTML =
-    'One per line: <code>username Site [room_id]</code><br>' +
-    'Or upload a JSON array like <code>[{"username":"alice","site":"Chaturbate"}]</code> — same schema as StreaMonitor\'s config.json.';
+    'One per line: <code>username Site</code> — room IDs auto-resolved.<br>' +
+    'Or upload a JSON array like <code>[{"username":"alice","site":"Chaturbate"}]</code>.';
   document.getElementById('bulkadd-text').placeholder =
-    'alice Chaturbate\nbob StripChat 12345\n# username site [room_id]';
+    'alice Chaturbate\nbob StripChat\n# username site (one per line)';
   document.getElementById('bulkadd-modal').classList.add('show');
   setTimeout(() => document.getElementById('bulkadd-text').focus(), 30);
 }
@@ -3134,6 +3402,19 @@ def api_failed():
     return jsonify(load_json(FAILED_PATH))
 
 
+@app.route("/api/site-health")
+def api_site_health():
+    """Per-site success/fail history + drift classification. The UI uses
+    this to flag sites that used to work but now fail every download."""
+    path = DOWNLOADS_DIR / "_site_health.json"
+    if not path.exists():
+        return jsonify({"sites": {}, "updated_at": ""})
+    try:
+        return jsonify(json.loads(path.read_text(encoding="utf-8")))
+    except Exception as e:
+        return jsonify({"error": f"read: {e}", "sites": {}}), 500
+
+
 @app.route("/api/run", methods=["POST"])
 def api_run():
     global _runner_thread
@@ -3360,6 +3641,21 @@ def api_live_start():
 
 @app.route("/api/live/stop", methods=["POST"])
 def api_live_stop():
+    if not _live:
+        return jsonify({"error": "live recording unavailable"}), 503
+    body = request.get_json(force=True) or {}
+    try:
+        r = _live.stop_model(body.get("username", ""), body.get("site", ""))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(r)
+
+
+@app.route("/api/live/pause", methods=["POST"])
+def api_live_pause():
+    """Pause is a soft-stop: model stays in the list, thread stops, the UI
+    shows a 'PAUSED' chip and a Start button to resume. Internally the
+    same as stop_model() — the UI just presents it differently."""
     if not _live:
         return jsonify({"error": "live recording unavailable"}), 503
     body = request.get_json(force=True) or {}

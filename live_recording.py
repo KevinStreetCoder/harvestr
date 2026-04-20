@@ -78,10 +78,36 @@ if _STREAMONITOR_PATH:
     try:
         if _STREAMONITOR_PATH not in sys.path:
             sys.path.insert(0, _STREAMONITOR_PATH)
-        # Some StreaMonitor site modules import `parameters` and
-        # `Controller` which expect the repo cwd. Give them an env hint.
-        os.environ.setdefault("STRMNTR_DOWNLOAD_DIR",
-                               str(Path(__file__).resolve().parent / "downloads"))
+        # Separate Live recordings from Archive downloads. Archive files
+        # go to downloads/<performer>/..., live recordings to
+        # downloads/_live/<performer> [SITE]/N.mkv — this keeps the two
+        # pipelines' outputs from tangling on disk.
+        _LIVE_DIR = Path(__file__).resolve().parent / "downloads" / "_live"
+        _LIVE_DIR.mkdir(parents=True, exist_ok=True)
+        os.environ["STRMNTR_DOWNLOAD_DIR"] = str(_LIVE_DIR)
+        # Apply Live settings from config.json (read BEFORE import so
+        # parameters.py sees them). These map to StreaMonitor's env hooks.
+        try:
+            _cfg_path = Path(__file__).resolve().parent / "config.json"
+            if _cfg_path.exists():
+                _cfg = json.loads(_cfg_path.read_text(encoding="utf-8"))
+                _live_cfg = _cfg.get("live") or {}
+                # Break length → SEGMENT_TIME (seconds)
+                bl_min = int(_live_cfg.get("break_length_min") or 0)
+                if bl_min > 0:
+                    os.environ["STRMNTR_SEGMENT_TIME"] = str(bl_min * 60)
+                # Poll interval — StreaMonitor has no direct env, but
+                # we'll apply to WEB_STATUS_FREQUENCY as a hint.
+                pi = int(_live_cfg.get("poll_interval_s") or 0)
+                if pi > 0:
+                    os.environ["STRMNTR_STATUS_FREQ"] = str(pi)
+                # Min download speed → FFMPEG_READRATE (bytes/s); skip
+                # if 0 so StreaMonitor uses its default.
+                ms = int(_live_cfg.get("min_speed_kbps") or 0)
+                if ms > 0:
+                    os.environ["STRMNTR_FFMPEG_READRATE"] = str(ms * 1024)
+        except Exception as _e:
+            log.debug(f"[live] apply live settings: {_e}")
         from streamonitor.bot import Bot as _Bot, RoomIdBot as _RoomIdBot   # noqa
         from streamonitor.enums.status import Status as _Status             # noqa
         Bot = _Bot
@@ -386,6 +412,15 @@ class LiveManager:
         total_sessions_bytes = 0
         status_hist: Dict[str, int] = {}
 
+        # Lazy-init the history tracker (file-backed)
+        if getattr(self, "_history", None) is None:
+            try:
+                from live_history import LiveHistory
+                self._history = LiveHistory(self.downloads_dir)
+            except Exception as e:
+                log.debug(f"[live] history init: {e}")
+                self._history = None
+
         with self._lock:
             for _, rm in sorted(self._models.items(),
                                 key=lambda kv: (kv[1].site, kv[1].username.lower())):
@@ -401,8 +436,26 @@ class LiveManager:
                 # video_files_total_size on the Bot)
                 size_bytes = int(getattr(bot, "video_files_total_size", 0) or 0)
                 total_sessions_bytes += size_bytes
+
+                # Extract rich metadata from bot.lastInfo (StripChat etc.
+                # expose age, country, language, tags, stream_duration,
+                # follower/spectator count, avatar/thumbnail URLs, etc.)
+                last_info = getattr(bot, "lastInfo", {}) or {}
+                enriched = _extract_rich_meta(last_info)
+
+                # Record state transition in history ledger (transition-only)
+                key = self.key_of(rm.username, rm.site)
+                if self._history:
+                    try:
+                        self._history.record(key, status_name, meta=enriched)
+                    except Exception as e:
+                        log.debug(f"[live] record {key}: {e}")
+
+                # Derived freq metrics
+                freq = self._history.snapshot(key) if self._history else {}
+
                 models.append({
-                    "key": self.key_of(rm.username, rm.site),
+                    "key": key,
                     "username": rm.username,
                     "site": rm.site,
                     "site_slug": getattr(bot, "siteslug", ""),
@@ -413,9 +466,24 @@ class LiveManager:
                     "status_label": label,
                     "status_color": color,
                     "size_bytes": size_bytes,
-                    "gender": getattr(getattr(bot, "gender", None), "value", "") or "",
-                    "country": getattr(bot, "country", "") or "",
-                    "last_info": self._scrub_last_info(getattr(bot, "lastInfo", {})),
+                    "gender": getattr(getattr(bot, "gender", None), "value", "") or enriched.get("gender", ""),
+                    "country": getattr(bot, "country", "") or enriched.get("country", ""),
+                    "language": enriched.get("language", ""),
+                    "age": enriched.get("age"),
+                    "tags": enriched.get("tags", []),
+                    "avatar_url": enriched.get("avatar_url", ""),
+                    "thumb_url": enriched.get("thumb_url", ""),
+                    "spectators": enriched.get("spectators"),
+                    "followers": enriched.get("followers"),
+                    "stream_duration_s": enriched.get("stream_duration_s"),
+                    # Derived frequency metrics (from LiveHistory)
+                    "last_online_ts": freq.get("last_online_ts", ""),
+                    "last_offline_ts": freq.get("last_offline_ts", ""),
+                    "online_sessions_7d": freq.get("online_sessions_7d", 0),
+                    "online_hours_7d": freq.get("online_hours_7d", 0),
+                    "avg_session_minutes": freq.get("avg_session_minutes", 0),
+                    "next_predicted_ts": freq.get("next_predicted_ts", ""),
+                    "peak_hour_utc": freq.get("peak_hour_utc", -1),
                 })
 
         return {
@@ -447,3 +515,112 @@ class LiveManager:
             elif isinstance(v, (list, tuple)):
                 safe[k] = len(v)
         return safe
+
+
+# ──────────────────────────────────────────────────────────────────────
+def _extract_rich_meta(info: Dict[str, Any]) -> Dict[str, Any]:
+    """Pull display-friendly metadata out of the site-specific bot.lastInfo.
+
+    Handles schema variations across StripChat / Chaturbate / CamSoda /
+    BongaCams / etc. — each API returns different field names. We try
+    common paths for every metric and keep the first non-empty value."""
+    if not isinstance(info, dict):
+        return {}
+
+    def _first(paths: list) -> Any:
+        for p in paths:
+            if isinstance(p, str):
+                if p in info and info[p] not in (None, ""):
+                    return info[p]
+                continue
+            # Path is a list of keys
+            cur = info
+            for k in p:
+                if isinstance(cur, dict) and k in cur:
+                    cur = cur[k]
+                else:
+                    cur = None
+                    break
+            if cur not in (None, ""):
+                return cur
+        return None
+
+    out: Dict[str, Any] = {}
+
+    # Country — StripChat: country, geo.country, location.country
+    country = _first(["country",
+                       ["geo", "country"],
+                       ["location", "country"],
+                       "countryCode",
+                       ["user", "country"]])
+    if country:
+        out["country"] = str(country).upper() if len(str(country)) == 2 else str(country)
+
+    # Language / spoken
+    lang = _first(["language",
+                    ["broadcastLanguage"],
+                    ["user", "language"],
+                    "spokenLanguages"])
+    if isinstance(lang, list) and lang:
+        lang = lang[0]
+    if lang:
+        out["language"] = str(lang)
+
+    # Age
+    age = _first(["age",
+                   ["user", "age"],
+                   ["broadcaster", "age"]])
+    if isinstance(age, (int, float)) and 18 <= age <= 99:
+        out["age"] = int(age)
+
+    # Tags (first 5)
+    tags = _first(["tags",
+                    ["model", "tags"],
+                    ["user", "tags"],
+                    "labels",
+                    "topics"])
+    if isinstance(tags, list):
+        clean = []
+        for t in tags[:10]:
+            if isinstance(t, dict):
+                t = t.get("name") or t.get("slug") or ""
+            if isinstance(t, str) and t.strip():
+                clean.append(t.strip()[:24])
+        if clean:
+            out["tags"] = clean[:8]
+
+    # Gender (if not already from bot.gender)
+    gender = _first(["gender", ["user", "gender"], "genderType"])
+    if gender:
+        out["gender"] = str(gender)
+
+    # Avatar / thumbnail — large poster OK for card background
+    for key_local, paths in (
+        ("avatar_url", ["avatarUrl", "avatar", "profilePictureUrl",
+                         ["user", "avatarUrl"], "imageUrl",
+                         ["broadcaster", "avatar"]]),
+        ("thumb_url", ["thumbnail", "thumbUrl", "snapshotURL", "previewURL",
+                        ["stream", "thumbnail"], "cameraSnapshot"]),
+    ):
+        val = _first(paths)
+        if isinstance(val, str) and val.startswith(("http", "//")):
+            out[key_local] = val if val.startswith("http") else "https:" + val
+
+    # Counters
+    spec = _first(["viewers", "spectators", "viewersCount",
+                    ["stream", "viewers"], ["cam", "viewers"]])
+    if isinstance(spec, (int, float)):
+        out["spectators"] = int(spec)
+
+    followers = _first(["followers", "followerCount", "subsCount",
+                         ["user", "followers"]])
+    if isinstance(followers, (int, float)):
+        out["followers"] = int(followers)
+
+    # Stream duration (seconds since broadcast started)
+    dur = _first(["broadcastDuration", "streamDuration",
+                   ["stream", "duration"]])
+    if isinstance(dur, (int, float)) and dur >= 0:
+        out["stream_duration_s"] = int(dur)
+
+    return out

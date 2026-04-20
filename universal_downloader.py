@@ -148,6 +148,7 @@ from custom_scrapers import (
 
 # Shared live-progress tracker (writes downloads/_progress.json for the UI).
 from progress_tracker import ProgressTracker, make_yt_dlp_hook
+from site_health import SiteHealth, record_run_outcomes
 
 try:
     from rich.console import Console
@@ -804,6 +805,9 @@ class UniversalDownloader:
         self.engine = YtdlpEngine(config, log)
         # Live progress tracker — the web UI tails downloads/_progress.json
         self.progress = ProgressTracker(self.output_dir)
+        # Site-drift tracker — persistent per-site success/fail ledger
+        # so the UI can surface sites that used to work but now fail.
+        self.health = SiteHealth(self.output_dir)
         # Custom scrapers for cam-archive sites not supported by yt-dlp.
         # Pass cookies_file so sites requiring auth (Recu.me, camwhores.tv
         # private videos) can access protected content.
@@ -1482,12 +1486,12 @@ class UniversalDownloader:
                                   f"(shard CDN unreachable — try a different VPN or wait)")
                     return ("skip", v, None)
                 if cv.stream_kind == "needs_browser":
-                    # Embed host (e.g. playmogo.com, doodstream) requires a
-                    # real browser to extract the m3u8. Mark skip so we
-                    # don't count as permanent failure — user can run a
-                    # Playwright-based tool for these.
-                    self.log.info(f"  NEEDS-BROWSER: {v.site}/{v.video_id} "
-                                  f"(embed host requires JS execution)")
+                    # All three embed-extractor tiers (no-browser, yt-dlp,
+                    # Playwright) failed. Embed host is probably new or the
+                    # player JS changed. Mark skip (not permanent-fail) so
+                    # we retry on next run after a site-code update.
+                    self.log.info(f"  EMBED-UNSUPPORTED: {v.site}/{v.video_id} "
+                                  f"(all extractor tiers failed — site may need scraper update)")
                     return ("skip", v, None)
                 self.failed.record_failure(v, "stream extraction failed", 0)
                 self.log.warning(f"  FAIL extract: {v.site}/{v.video_id}: {v.title[:60]}")
@@ -1651,30 +1655,40 @@ class UniversalDownloader:
         for v in videos:
             groups[(v.performer, v.site)].append(v)
 
+        # Per-site outcome counts so the site-health tracker can detect drift
+        # (sites that used to succeed but now fail every time).
+        per_site_stats: Dict[str, Dict[str, int]] = {}
+
         for (performer, site), site_videos in groups.items():
             site_key = f"{performer}|{site}"
+            site_bucket = per_site_stats.setdefault(site, {"ok": 0, "fail": 0, "skip": 0})
             # Process sequentially per site so we can stop at max_per_site successes
             for v in site_videos:
                 if site_success.get(site_key, 0) >= max_per_site:
                     break
                 if not self.check_disk_space():
                     self.log.error("Disk full — aborting downloads.")
+                    stats["_per_site"] = per_site_stats
                     return stats
                 try:
                     r = _dl_one(v)
                 except Exception as e:
                     self.log.warning(f"Download exception {v.site}/{v.video_id}: {e}")
                     stats["fail"] += 1
+                    site_bucket["fail"] += 1
                     continue
                 if r is None:
                     stats["skip"] += 1
+                    site_bucket["skip"] += 1
                     self.progress.session_increment("skip")
                     continue
                 status, rv, _ = r
                 stats[status] += 1
+                site_bucket[status] = site_bucket.get(status, 0) + 1
                 self.progress.session_increment(status)
                 if status == "ok":
                     site_success[site_key] = site_success.get(site_key, 0) + 1
+        stats["_per_site"] = per_site_stats
         return stats
 
     # ── High-level orchestration ─────────────────────────────────────────────
@@ -1796,6 +1810,31 @@ class UniversalDownloader:
         summary["downloaded"] = stats["ok"]
         summary["failed"] = stats["fail"]
         self.log.info(f"'{performer}' done: {stats['ok']} OK, {stats['fail']} failed, {stats['skip']} skipped")
+
+        # Site-drift ledger: record per-site outcomes from this run so the
+        # UI can flag sites that were working before but now all-fail.
+        try:
+            per_site = stats.get("_per_site") or {}
+            hit_sites = hit_site_names
+            probed_sites = {h.site for h in yt_hits} | \
+                           {ch[1].site for ch in custom_hits} | \
+                           set(empty_auth)
+            record_run_outcomes(self.health, per_site, hit_sites, probed_sites)
+            drift = self.health.drift_report()
+            if drift.get("broken"):
+                self.log.warning(
+                    f"DRIFT: {len(drift['broken'])} site(s) now broken "
+                    f"(probe hits but downloads all fail): "
+                    f"{', '.join(drift['broken'])}"
+                )
+            if drift.get("degraded"):
+                self.log.info(
+                    f"DRIFT: {len(drift['degraded'])} site(s) degraded: "
+                    f"{', '.join(drift['degraded'])}"
+                )
+        except Exception as e:
+            self.log.debug(f"site-health record failed: {e}")
+
         self.progress.set_phase("done", f"Done: {stats['ok']} OK, {stats['fail']} failed")
         self.progress.session_end()
         return summary

@@ -1,6 +1,6 @@
 # Harvestr
 
-> **One username in → every video they've ever posted, across 50+ sites out.**
+> **One username in, every video they've ever posted, across 50+ sites out.**
 
 Harvestr is a cross-platform video archival tool that probes dozens of video
 hosting, cam-archive, and creator-economy sites for a single username, then
@@ -560,3 +560,17 @@ Stands on the shoulders of:
   backend is StreaMonitor's 19-site `Bot` framework. We import it at runtime rather
   than reimplementing the per-site reverse-engineering; they've earned those lines
   of code the hard way
+
+---
+
+## Disclaimer
+
+**Harvestr is a proof of concept.** It exists to demonstrate what a cross-site
+username→video pipeline looks like in practice — probes, custom scrapers, embed
+extractors, live recording, drift detection, UI, all glued together. It is **not**
+a production-grade product: sites change layouts weekly, CDNs rotate, and any
+one of the 50+ supported endpoints can go silently broken overnight. Treat every
+download run as experimental, verify the output before trusting it, and expect
+the occasional breakage that needs a quick scraper patch. PRs welcome — but
+please understand this project prioritises "does it work today?" over long-term
+maintenance commitments.

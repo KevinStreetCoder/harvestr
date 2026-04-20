@@ -929,7 +929,7 @@ class UniversalDownloader:
             candidates.sort(key=lambda t: (-t[1].entry_count, t[0]))
             best = candidates[0][1]
             hits.append(best)
-            self.progress.note_hit(best.site, best.entry_count)
+            self.progress.note_hit(best.site, best.entry_count, url=best.url)
             self.log.info(f"  HIT: {best.site} ({best.entry_count} videos) @ {best.url}")
             if len(candidates) > 1:
                 others = [f"{c[1].url[:60]} ({c[1].entry_count})" for c in candidates[1:]]
@@ -1033,7 +1033,7 @@ class UniversalDownloader:
         for scraper, hit, variant in results:
             tag = f" [variant:{variant}]" if variant != performer else ""
             self.log.info(f"  HIT: {hit.site} ({hit.entry_count} videos) @ {hit.url}{tag}")
-            self.progress.note_hit(hit.site, hit.entry_count)
+            self.progress.note_hit(hit.site, hit.entry_count, url=hit.url)
         return results
 
     def enumerate_custom(self, scraper: _CustomSiteScraper, hit, performer: str) -> List[VideoRef]:
@@ -1509,6 +1509,7 @@ class UniversalDownloader:
         slot = self.progress.start_video(
             site=v.site, video_id=v.video_id,
             title=v.title or v.video_id, backend=backend,
+            video_url=v.video_url or "",
         )
         cancelled = False
         try:
@@ -1574,6 +1575,7 @@ class UniversalDownloader:
             slot = self.progress.start_video(
                 site=v.site, video_id=v.video_id,
                 title=v.title or v.video_id, backend="yt-dlp",
+                video_url=v.video_url or "",
             )
             cancelled = False
             try:

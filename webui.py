@@ -580,6 +580,34 @@ INDEX_HTML = r"""
   .pill.hit-pill {
     background: #103d1d; color: #6dea8c; border-color: #225a2d;
   }
+  .hit-pill-link {
+    display: inline-flex; align-items: center; gap: 5px;
+    text-decoration: none;
+    transition: background .14s, color .14s, border-color .14s, transform .14s;
+    cursor: pointer;
+  }
+  .hit-pill-link:hover {
+    background: #1b5a2e; color: #9cff9c; border-color: #2f7d42;
+    transform: translateY(-1px);
+    box-shadow: 0 3px 8px #0f3b1f60;
+  }
+  .hit-pill-link .ext-icon {
+    width: 10px; height: 10px; opacity: 0.7; flex-shrink: 0;
+    margin-left: 1px; transition: opacity .14s;
+  }
+  .hit-pill-link:hover .ext-icon { opacity: 1; }
+
+  /* Clickable video title in active download row */
+  .dl-active .top .title.clickable {
+    cursor: pointer;
+    transition: color .15s, text-decoration-color .15s;
+    text-decoration: underline dashed transparent;
+    text-underline-offset: 3px;
+  }
+  .dl-active .top .title.clickable:hover {
+    color: var(--accent);
+    text-decoration-color: var(--accent);
+  }
 
   /* Tooltips — use max z-index + escape via filter so cards can't clip */
   [data-tip] { position: relative; }
@@ -1596,7 +1624,24 @@ async function refreshProgress() {
     if ((sess.sites_hit || []).length > 0) {
       hitsHtml = `<div class="hits-row"><span class="hits-label">Sites with videos:</span> ` +
         sess.sites_hit.slice().sort((a,b) => (b.count||0) - (a.count||0))
-          .map(h => `<span class="pill hit-pill">${escapeHtml(h.site)} · ${h.count}</span>`)
+          .map(h => {
+            const url = h.url || '';
+            const tip = url
+              ? `Open ${escapeHtml(h.site)} page for '${escapeHtml(sess.performer || '')}' in new tab — verify it's the right ${h.count} videos`
+              : '';
+            const inner = `${escapeHtml(h.site)} · ${h.count}`;
+            if (url) {
+              return `<a class="pill hit-pill hit-pill-link" href="${escapeHtml(url)}"
+                         target="_blank" rel="noopener noreferrer"
+                         data-tip="${tip}">${inner}
+                         <svg class="ext-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                              stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                           <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                           <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+                         </svg></a>`;
+            }
+            return `<span class="pill hit-pill">${inner}</span>`;
+          })
           .join(' ') + '</div>';
     }
 
@@ -1612,10 +1657,19 @@ async function refreshProgress() {
         const slot = (a.slot !== undefined && a.slot !== null) ? a.slot : -1;
         const cancelling = (p.cancelled_slots || []).includes(slot);
         const btnTitle = cancelling ? 'Cancelling…' : 'Skip this download';
+        // Video-verify link: if we know the source URL, title becomes clickable
+        const vurl = a.video_url || '';
+        const titleText = escapeHtml(a.title || a.video_id || '');
+        const titleFull = escapeHtml(a.title || '');
+        const titleEl = vurl
+          ? `<a class="title clickable" href="${escapeHtml(vurl)}" target="_blank"
+                rel="noopener noreferrer" title="${titleFull}"
+                data-tip="Open on ${escapeHtml(a.site || '')} in new tab — verify this is ${escapeHtml(sess.performer || 'the right performer')}">${titleText}</a>`
+          : `<span class="title" title="${titleFull}">${titleText}</span>`;
         return `<div class="dl-active${cancelling ? ' cancelling' : ''}" data-slot="${slot}">
           <div class="top">
             <span class="pill ${a.backend === 'yt-dlp' ? 'ytdlp' : 'custom'}">${escapeHtml(a.site || '?')}</span>
-            <span class="title" title="${escapeHtml(a.title || '')}">${escapeHtml(a.title || a.video_id || '')}</span>
+            ${titleEl}
             <span class="meta">${done} / ${total} · ${speed} · ETA ${eta} · ${pct.toFixed(1)}%</span>
             <button class="dl-cancel" title="${btnTitle}" aria-label="${btnTitle}"
                     ${slot < 0 || cancelling ? 'disabled' : ''}

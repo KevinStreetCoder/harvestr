@@ -124,12 +124,18 @@ class ProgressTracker:
             self.session["probe_total"] = total
         self._flush()
 
-    def note_hit(self, site: str, count: int) -> None:
+    def note_hit(self, site: str, count: int, url: str = "") -> None:
+        """Record a successful site probe. The URL (optional) is stored so the
+        web UI can make each site-pill clickable → open the performer's page
+        on that site in a new tab for manual verification."""
         with self._lock:
             hits = self.session.get("sites_hit", [])
             # Replace existing entry for this site if present (dedup)
             hits = [h for h in hits if h.get("site") != site]
-            hits.append({"site": site, "count": int(count)})
+            entry = {"site": site, "count": int(count)}
+            if url:
+                entry["url"] = url
+            hits.append(entry)
             self.session["sites_hit"] = hits
             self.session["videos_found"] = sum(h.get("count", 0) for h in hits)
         self._flush()
@@ -153,8 +159,11 @@ class ProgressTracker:
     # ── per-download ─────────────────────────────────────────────────
 
     def start_video(self, *, site: str, video_id: str, title: str,
-                    backend: str) -> int:
-        """Register a new active download. Returns a slot id for updates."""
+                    backend: str, video_url: str = "") -> int:
+        """Register a new active download. Returns a slot id for updates.
+        The video_url (optional) is exposed to the webui so the user can
+        click the active-row title to open the source page and verify
+        the download belongs to the right performer."""
         with self._lock:
             slot = self._slot_counter
             self._slot_counter += 1
@@ -164,6 +173,7 @@ class ProgressTracker:
                 "site": site,
                 "title": title[:150],
                 "backend": backend,
+                "video_url": video_url,
                 "bytes_done": 0,
                 "bytes_total": 0,
                 "percent": 0.0,

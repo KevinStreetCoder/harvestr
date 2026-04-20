@@ -1960,15 +1960,37 @@ async function refreshStatus() {
     const s = await api('/api/status');
     const dot = document.getElementById('status-dot');
     const txt = document.getElementById('status-text');
-    if (s.running) {
+
+    // Build a compact activity label. Priorities:
+    //   1. Live recording (most real-time thing happening)
+    //   2. Archive downloading
+    //   3. Both → show both
+    //   4. Neither → idle
+    const bits = [];
+    if (s.live_recording > 0) {
+      bits.push(`<span style="color:var(--good);">● ${s.live_recording} live</span>`);
+    } else if (s.live_running > 0) {
+      bits.push(`${s.live_running} polling`);
+    }
+    if (s.archive_running) {
+      const p = s.archive_progress || {};
+      if (p.total) {
+        bits.push(`<span style="color:var(--accent);">${escapeHtml(p.performer || 'archive')} ${p.done}/${p.total}</span>`);
+      } else {
+        bits.push(`<span style="color:var(--accent);">${escapeHtml(p.performer || 'archive')}</span>`);
+      }
+    }
+
+    if (s.any_busy) {
       dot.className = 'status-dot running';
-      txt.textContent = (s.current_performer || 'running...');
+      txt.innerHTML = bits.length ? bits.join(' · ') : 'running...';
     } else {
       dot.className = 'status-dot';
       txt.textContent = 'idle';
     }
-    document.getElementById('start-btn').disabled = s.running;
-    document.getElementById('stop-btn').disabled = !s.running;
+    // Start button enabled only when NO archive job is running anywhere
+    document.getElementById('start-btn').disabled = s.archive_running || s.running;
+    document.getElementById('stop-btn').disabled = !(s.archive_running || s.running);
 
     // Live log
     const lv = document.getElementById('log-viewer');
@@ -3820,14 +3842,72 @@ def index():
 
 @app.route("/api/status")
 def api_status():
+    """Combined activity signal for the header pill.
+
+    _state["running"] only tracks archive jobs started BY this webui
+    process. If the user started the downloader directly from the CLI
+    (or before we restarted) we wouldn't see it — so we also check the
+    shared _progress.json (written by any downloader process) and the
+    live manager for recording models. Any of these means "not idle"."""
     with _state_lock:
-        return jsonify({
-            "running": _state["running"],
-            "pid": _state["pid"],
-            "started_at": _state["started_at"],
-            "current_performer": _state["current_performer"],
-            "log_tail": list(_state["log_tail"])[-200:],
-        })
+        ours_running = bool(_state["running"])
+        current_performer = _state["current_performer"]
+        started_at = _state["started_at"]
+        pid = _state["pid"]
+        log_tail = list(_state["log_tail"])[-200:]
+
+    # Is ANY downloader subprocess writing to _progress.json?
+    archive_running = False
+    archive_perf = ""
+    archive_progress = {}
+    try:
+        pp = DOWNLOADS_DIR / "_progress.json"
+        if pp.exists():
+            data = json.loads(pp.read_text(encoding="utf-8"))
+            sess = data.get("session") or {}
+            if sess.get("running"):
+                archive_running = True
+                archive_perf = sess.get("performer", "") or ""
+                total = int(sess.get("total_queued", 0))
+                done = int(sess.get("ok", 0)) + int(sess.get("fail", 0)) + int(sess.get("skip", 0))
+                archive_progress = {
+                    "performer": archive_perf,
+                    "phase": sess.get("phase", ""),
+                    "done": done, "total": total,
+                    "ok": int(sess.get("ok", 0)),
+                    "fail": int(sess.get("fail", 0)),
+                    "skip": int(sess.get("skip", 0)),
+                }
+    except Exception:
+        pass
+
+    # Any Live recorders running / recording right now?
+    live_running = 0
+    live_recording = 0
+    if _live:
+        try:
+            snap = _live.get_snapshot()
+            live_running = int((snap.get("summary") or {}).get("running", 0))
+            live_recording = int((snap.get("summary") or {}).get("recording", 0))
+        except Exception:
+            pass
+
+    any_busy = ours_running or archive_running or live_recording > 0
+
+    return jsonify({
+        # Backwards-compat: `running` = "this webui launched a job"
+        "running": ours_running,
+        "pid": pid,
+        "started_at": started_at,
+        "current_performer": current_performer or archive_perf,
+        # New: broader activity signal the header can render
+        "any_busy": any_busy,
+        "archive_running": archive_running,
+        "archive_progress": archive_progress,
+        "live_running": live_running,
+        "live_recording": live_recording,
+        "log_tail": log_tail,
+    })
 
 
 @app.route("/api/config", methods=["GET", "POST"])

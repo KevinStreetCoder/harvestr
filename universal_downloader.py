@@ -95,6 +95,49 @@ def _is_404_playlist(title: str, url: str) -> bool:
     return False
 
 
+def _is_cross_host_redirect(probed_url: str, info: dict) -> tuple[bool, str]:
+    """Detect when yt-dlp's generic extractor "fell back" from a 404 onto
+    a completely different site's homepage.
+
+    Real-world case: `camwhores.tv/models/{u}/` returns HTTP 404. The generic
+    extractor's fallback parses the 404 HTML, finds youporn.com links
+    (ads on the page), follows the redirect, lands on `https://www.youporn.com/`
+    homepage, and YouPornVideos extractor dutifully enumerates the ENTIRE
+    trending videos catalog — hundreds of pages of off-topic content.
+
+    We detect this by comparing hostnames:
+      - probed_url: e.g. `https://camwhores.tv/models/alice/`
+      - info.webpage_url: e.g. `https://www.youporn.com/`
+    If the eTLD+1 of the final page differs from the probed URL, reject.
+
+    Returns (is_cross_host, reason).
+    """
+    if not info:
+        return False, ""
+    final_url = str(info.get("webpage_url") or info.get("url") or "")
+    if not final_url:
+        return False, ""
+    try:
+        from urllib.parse import urlparse
+        probed_host = (urlparse(probed_url).hostname or "").lower()
+        final_host = (urlparse(final_url).hostname or "").lower()
+    except Exception:
+        return False, ""
+    if not probed_host or not final_host:
+        return False, ""
+    # Strip www./m. prefixes
+    def _base(h: str) -> str:
+        for pfx in ("www.", "m.", "en.", "beta."):
+            if h.startswith(pfx):
+                h = h[len(pfx):]
+        # Strip leading subdomain like "a.", "b1." — compare eTLD+1ish
+        parts = h.split(".")
+        return ".".join(parts[-2:]) if len(parts) >= 2 else h
+    if _base(probed_host) != _base(final_host):
+        return True, f"probed {probed_host!r} → final {final_host!r}"
+    return False, ""
+
+
 # Custom scrapers for cam archive sites not supported by yt-dlp
 import custom_scrapers
 from custom_scrapers import (
@@ -583,6 +626,14 @@ class YtdlpEngine:
                     self.log.debug(f"Probe rejected: landed on 404 page — {url} "
                                    f"(title: {title!r})")
                     return None
+                # Reject probes that redirected across hosts. e.g. camwhores.tv
+                # 404 → generic fallback finds youporn.com link in the page →
+                # follows to https://www.youporn.com/ → YouPornVideos
+                # extractor enumerates the whole site.
+                cross, why = _is_cross_host_redirect(url, info)
+                if cross:
+                    self.log.debug(f"Probe rejected: cross-host redirect ({why})")
+                    return None
                 return info
         except yt_dlp.utils.DownloadError as e:
             self.log.debug(f"Probe failed for {url}: {e}")
@@ -618,6 +669,15 @@ class YtdlpEngine:
                     self.log.warning(
                         f"Enumerate rejected: landed on 404 page — {url} "
                         f"(title: {title!r}). Would have yielded unrelated content."
+                    )
+                    return []
+                # Cross-host redirect guard: e.g. camwhores.tv → youporn.com
+                # (see _is_cross_host_redirect for context).
+                cross, why = _is_cross_host_redirect(url, info)
+                if cross:
+                    self.log.warning(
+                        f"Enumerate rejected: cross-host redirect ({why}). "
+                        f"Would have yielded unrelated content."
                     )
                     return []
                 entries = info.get("entries") or [info]

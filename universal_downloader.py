@@ -1115,7 +1115,53 @@ class UniversalDownloader:
             v.performer = performer
             if not v.site or v.site == "unknown":
                 v.site = hit.site
-        return videos
+
+        # Uploader-mismatch filter: SoundCloud user pages, YouTube channel
+        # mixed-content lists (`@user/streams` that include guest appearances),
+        # Twitter's "media" page that can surface replies to other accounts,
+        # etc. all sometimes leak videos whose `uploader` / `uploader_id`
+        # clearly isn't the requested performer. Drop those — they'd
+        # otherwise land in the wrong performer's folder.
+        filtered: List[VideoRef] = []
+        dropped = 0
+        for v in videos:
+            upl = (v.uploader or "").strip()
+            upl_id = (v.uploader_id or "").strip()
+            if not upl and not upl_id:
+                filtered.append(v)  # no uploader info → can't validate, keep
+                continue
+            matched = False
+            for candidate in (upl, upl_id):
+                if not candidate:
+                    continue
+                if custom_scrapers.video_title_matches_user(candidate, performer):
+                    matched = True
+                    break
+            # Also accept if the PLAYLIST/channel URL itself mentions the
+            # performer (prevents false-reject when yt-dlp uses a numeric
+            # uploader_id that won't match the slug).
+            if not matched and custom_scrapers.video_title_matches_user(
+                    hit.url or "", performer):
+                # Performer's own channel page; uploader field may be legit
+                # but just differently cased / accented. Keep ONLY if the
+                # video URL itself stays on that user's slug.
+                if v.video_url and custom_scrapers.video_title_matches_user(
+                        v.video_url, performer):
+                    matched = True
+            if matched:
+                filtered.append(v)
+            else:
+                dropped += 1
+                self.log.debug(
+                    f"  [{hit.site}] uploader-mismatch drop: "
+                    f"uploader={upl!r} id={upl_id!r} url={(v.video_url or '')[:80]}"
+                )
+        if dropped:
+            self.log.info(
+                f"  {hit.site}: dropped {dropped} uploader-mismatch "
+                f"results (not actually {performer!r}'s content)"
+            )
+        return filtered
 
     # KVS-family sites share identical video IDs across mirrors. When the same
     # video_id is already downloaded on one KVS site, we don't need to fetch it

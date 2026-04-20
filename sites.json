@@ -70,10 +70,11 @@
     "soundcloud": {
       "category": "mainstream",
       "patterns": [
-        "https://soundcloud.com/{u}"
+        "https://soundcloud.com/{u}/tracks"
       ],
       "yt_dlp_extractor": "soundcloud",
-      "supports_flat": true
+      "supports_flat": true,
+      "notes": "/tracks endpoint only (user's uploads). The bare /{u} URL also includes reposts of other users' tracks, which cross-contaminate the performer folder."
     },
     "archive_org": {
       "category": "archive",

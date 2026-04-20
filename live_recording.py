@@ -79,10 +79,21 @@ if _STREAMONITOR_PATH:
         if _STREAMONITOR_PATH not in sys.path:
             sys.path.insert(0, _STREAMONITOR_PATH)
         # Separate Live recordings from Archive downloads. Archive files
-        # go to downloads/<performer>/..., live recordings to
-        # downloads/_live/<performer> [SITE]/N.mkv — this keeps the two
-        # pipelines' outputs from tangling on disk.
+        # go to <output_dir>/<performer>/..., live recordings to
+        # <live_output_dir>/<performer> [SITE]/N.mkv. By default
+        # live_output_dir = <output_dir>/_live, but the user can override
+        # it in the Live settings modal to put recordings on a different
+        # drive (e.g. a secondary disk with more space for long streams).
         _LIVE_DIR = Path(__file__).resolve().parent / "downloads" / "_live"
+        try:
+            _cfg_path_early = Path(__file__).resolve().parent / "config.json"
+            if _cfg_path_early.exists():
+                _cfg_early = json.loads(_cfg_path_early.read_text(encoding="utf-8"))
+                _user_live = (_cfg_early.get("live") or {}).get("live_output_dir") or ""
+                if _user_live:
+                    _LIVE_DIR = Path(_user_live).expanduser()
+        except Exception:
+            pass
         _LIVE_DIR.mkdir(parents=True, exist_ok=True)
         os.environ["STRMNTR_DOWNLOAD_DIR"] = str(_LIVE_DIR)
         # Apply Live settings from config.json (read BEFORE import so
@@ -199,8 +210,78 @@ class LiveManager:
         self.config_path = self.downloads_dir / "live_models.json"
         self._lock = threading.RLock()
         self._models: Dict[str, _RunningModel] = {}   # key = "username|site"
+        # Live recordings folder — honors config.live.live_output_dir if set,
+        # otherwise defaults to downloads/_live/.
+        self.live_dir = self._resolve_live_dir()
         # On startup, reconstruct from config (do NOT auto-start — user clicks)
         self._restore()
+
+    def _resolve_live_dir(self) -> Path:
+        """Live recordings go to config.live.live_output_dir (if set) or
+        downloads/_live/. Called at init time — same time the env var for
+        StreaMonitor is set, so it's consistent with where recordings land."""
+        try:
+            cfg_path = Path(__file__).resolve().parent / "config.json"
+            if cfg_path.exists():
+                cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+                live_dir = (cfg.get("live") or {}).get("live_output_dir") or ""
+                if live_dir:
+                    p = Path(live_dir).expanduser()
+                    p.mkdir(parents=True, exist_ok=True)
+                    return p
+        except Exception as e:
+            log.debug(f"[live] resolve live_dir: {e}")
+        p = self.downloads_dir / "_live"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def model_folder(self, username: str, site: str) -> Path:
+        """Where this model's recordings live on disk."""
+        # StreaMonitor's output layout: <live_dir>/<username> [SITESLUG]/
+        site_cls = SITES.get(site)
+        slug = getattr(site_cls, "siteslug", site) if site_cls else site
+        return self.live_dir / f"{username} [{slug}]"
+
+    def repair_model(self, username: str, site: str, *,
+                      delete_if_unfixable: bool = False) -> Dict[str, Any]:
+        """Run the 3-tier repair pipeline over one model's recordings folder.
+        Skips files that are currently locked by the recorder."""
+        try:
+            import video_repair
+        except ImportError as e:
+            return {"error": f"video_repair import failed: {e}"}
+        folder = self.model_folder(username, site)
+        if not folder.exists():
+            return {"error": f"no folder at {folder}", "username": username, "site": site}
+        log.info(f"[live] repair sweep: {folder}")
+        results = video_repair.sweep_folder(
+            str(folder), recursive=True,
+            delete_if_unfixable=delete_if_unfixable,
+            skip_if_locked=True, log=log,
+        )
+        summary = video_repair.summarize(results)
+        summary["username"] = username
+        summary["site"] = site
+        summary["folder"] = str(folder)
+        return summary
+
+    def repair_all(self, *, delete_if_unfixable: bool = False,
+                    only_recent_hours: float = 0.0) -> Dict[str, Any]:
+        """Sweep every model's folder under the live directory. Optionally
+        limit to files modified in the last N hours (for frequent
+        scheduled runs that shouldn't re-touch old recordings)."""
+        try:
+            import video_repair
+        except ImportError as e:
+            return {"error": f"video_repair import failed: {e}"}
+        log.info(f"[live] repair-all sweep: {self.live_dir} (recent_hours={only_recent_hours})")
+        results = video_repair.sweep_folder(
+            str(self.live_dir), recursive=True,
+            delete_if_unfixable=delete_if_unfixable,
+            only_recent_seconds=only_recent_hours * 3600 if only_recent_hours else 0,
+            skip_if_locked=True, log=log,
+        )
+        return video_repair.summarize(results)
 
     @staticmethod
     def key_of(username: str, site: str) -> str:

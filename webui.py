@@ -1288,6 +1288,10 @@ INDEX_HTML = r"""
   <div id="live-controls" style="display:none; gap:8px;">
     <button class="success" onclick="liveToggleAll(true)" data-tip="Start polling every model">▶ Start all live</button>
     <button class="danger" onclick="liveToggleAll(false)" data-tip="Stop polling every model">■ Stop all</button>
+    <button class="ghost" onclick="liveRepairAll()" data-tip="Check + repair every recording across all models">
+      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+      Repair all
+    </button>
     <button class="ghost" onclick="liveRefresh()" aria-label="Refresh">↻</button>
   </div>
 </header>
@@ -1714,6 +1718,15 @@ INDEX_HTML = r"""
 
     <div class="livesettings-body">
       <div class="ls-section">
+        <div class="ls-section-title">Storage</div>
+        <div class="ls-row" style="grid-template-columns: auto 1fr;">
+          <label for="cfg-live-output-dir" data-tip="Where live recordings go. Separate from Archive downloads.">Recording folder</label>
+          <input id="cfg-live-output-dir" type="text" style="width:100%; text-align:left;"
+                 placeholder="(default: <downloads>/_live)"/>
+        </div>
+      </div>
+
+      <div class="ls-section">
         <div class="ls-section-title">Segmentation</div>
         <div class="ls-row">
           <label for="cfg-live-break-mb" data-tip="Max file size per segment. Recorder rolls to a new file when reached.">Break size
@@ -2103,6 +2116,7 @@ function openLiveSettings() {
   // Re-populate from the latest config (loadConfig has already run at boot)
   const g = (id) => document.getElementById(id);
   const live = (_config && _config.live) || {};
+  g('cfg-live-output-dir').value    = live.live_output_dir ?? '';
   g('cfg-live-break-mb').value      = live.break_size_mb ?? '';
   g('cfg-live-break-min').value     = live.break_length_min ?? '';
   g('cfg-live-poll-int').value      = live.poll_interval_s ?? '';
@@ -2113,7 +2127,7 @@ function openLiveSettings() {
   g('cfg-live-postprocess').checked = !!(live.post_process_mp4 ?? false);
   g('cfg-live-keep-n').value        = live.keep_last_n ?? '';
   document.getElementById('livesettings-modal').classList.add('show');
-  setTimeout(() => g('cfg-live-break-mb').focus(), 40);
+  setTimeout(() => g('cfg-live-output-dir').focus(), 40);
 }
 function closeLiveSettings(e) {
   if (e && e.target && e.target.id !== 'livesettings-modal') return;
@@ -2122,6 +2136,7 @@ function closeLiveSettings(e) {
 async function saveLiveSettings() {
   const g = (id) => document.getElementById(id);
   const liveCfg = {
+    live_output_dir:  g('cfg-live-output-dir').value.trim(),
     break_size_mb:    parseInt(g('cfg-live-break-mb').value)    || 0,
     break_length_min: parseInt(g('cfg-live-break-min').value)   || 0,
     poll_interval_s:  parseInt(g('cfg-live-poll-int').value)    || 30,
@@ -2873,11 +2888,18 @@ function renderLiveModels() {
           Start
         </button>`;
     }
-    // Folder — opens downloads/_live/<user> [SITE]/ in explorer
+    // Folder — opens live_dir/<user> [SITE]/ in explorer
     actions += `
       <button class="ghost icon-only" onclick="liveOpenFolder('${u}','${escapeHtml(m.site_slug || m.site)}')"
               data-tip="Open recordings folder on disk" aria-label="Open folder">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+      </button>`;
+    // Repair — checks every recorded file in this model's folder, fixes
+    // what it can (remux or re-encode) and flags the hopeless ones.
+    actions += `
+      <button class="ghost icon-only" onclick="liveRepair('${u}','${s}')"
+              data-tip="Check + repair recordings (ffprobe validate, ffmpeg fix)" aria-label="Repair recordings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
       </button>`;
     actions += `
       <button class="ghost icon-only" onclick="liveRemove('${u}','${s}')"
@@ -3006,13 +3028,70 @@ async function livePause(username, site) {
   } catch(e) { toast('Error: '+e.message, 'error'); }
 }
 async function liveOpenFolder(username, siteSlug) {
-  // Recordings live at downloads/_live/<username> [SLUG]/
+  // Recordings live at live_dir/<username> [SLUG]/
   const folder = `_live/${username} [${siteSlug}]`;
   try {
     await api('/api/open-folder', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({path: folder})});
     toast(`Opened folder for ${username}`);
   } catch(e) { toast('Folder not found — no recordings yet?', 'error'); }
+}
+
+// ── Live repair: 3-tier ffmpeg pipeline (check → remux → re-encode → delete)
+function _repairSummary(r) {
+  const c = r.counts || {};
+  const parts = [];
+  if (c.ok)        parts.push(`${c.ok} already OK`);
+  if (c.remuxed)   parts.push(`<b style="color:var(--good)">${c.remuxed} remuxed</b>`);
+  if (c.reencoded) parts.push(`<b style="color:var(--accent)">${c.reencoded} re-encoded</b>`);
+  if (c.deleted)   parts.push(`<b style="color:var(--bad)">${c.deleted} deleted</b> (unrepairable)`);
+  if (c.failed)    parts.push(`<b style="color:var(--warn)">${c.failed} still broken</b>`);
+  if (!parts.length) parts.push('no files found to repair');
+  return `Scanned <b>${r.total || 0}</b> files: ` + parts.join(' · ');
+}
+
+async function liveRepair(username, site) {
+  const ok = await confirmDialog(
+    `Check every recording for <b>${escapeHtml(username)}</b> on <b>${escapeHtml(site)}</b>?<br><br>` +
+    `Tier 1 (ffprobe): validate playability.<br>` +
+    `Tier 2 (ffmpeg remux): fix missing moov atoms — no quality loss.<br>` +
+    `Tier 3 (ffmpeg re-encode): last-resort full re-encode.<br>` +
+    `<br>Files the recorder is currently writing to are skipped.`,
+    {title: 'Repair recordings', tone: 'info',
+     confirmLabel: 'Repair', cancelLabel: 'Cancel'});
+  if (!ok) return;
+  toast('Repair running... this may take a minute');
+  try {
+    const r = await api('/api/live/repair', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({username, site, delete_if_unfixable: false})});
+    if (r.error) { toast('Error: ' + r.error, 'error'); return; }
+    await confirmDialog(_repairSummary(r),
+      {title:`${username} · repair complete`, tone:'info',
+       confirmLabel:'OK', hideCancel:true});
+  } catch(e) { toast('Error: '+e.message, 'error'); }
+}
+
+async function liveRepairAll() {
+  const deleteUnfixable = await confirmDialog(
+    `Sweep every model's recording folder and repair every video.<br><br>` +
+    `<b>Delete unfixable files?</b><br>` +
+    `If <b>YES</b>: files that even a full re-encode can't save are deleted (e.g. truncated-to-header stubs).<br>` +
+    `If <b>NO</b>: broken files stay on disk and are just flagged in the report.<br><br>` +
+    `Files currently being recorded are always skipped.`,
+    {title: 'Repair all recordings', tone: 'warn',
+     confirmLabel: 'YES — delete unfixable', cancelLabel: 'Keep broken files'});
+  // Note: with hideCancel=false, cancelLabel click resolves false, confirmLabel resolves true
+  toast('Sweep running... check the log for progress');
+  try {
+    const r = await api('/api/live/repair_all', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({delete_if_unfixable: !!deleteUnfixable})});
+    if (r.error) { toast('Error: ' + r.error, 'error'); return; }
+    await confirmDialog(_repairSummary(r),
+      {title:'Repair all · complete', tone:'info',
+       confirmLabel:'OK', hideCancel:true});
+  } catch(e) { toast('Error: '+e.message, 'error'); }
 }
 async function openLocalPath(path) {
   // Generic "open this file/folder on disk" helper used across the UI.
@@ -4163,6 +4242,42 @@ def api_live_toggle_all():
         return jsonify({"error": "live recording unavailable"}), 503
     body = request.get_json(force=True) or {}
     return jsonify(_live.toggle_all(bool(body.get("running", True))))
+
+
+@app.route("/api/live/repair", methods=["POST"])
+def api_live_repair():
+    """Run video-repair pipeline on one model's recordings.
+
+    Body: {"username", "site", "delete_if_unfixable": false}
+    Returns counts of ok / remuxed / reencoded / deleted / failed files."""
+    if not _live:
+        return jsonify({"error": "live recording unavailable"}), 503
+    body = request.get_json(force=True) or {}
+    u = (body.get("username") or "").strip()
+    s = (body.get("site") or "").strip()
+    if not u or not s:
+        return jsonify({"error": "username + site required"}), 400
+    delete = bool(body.get("delete_if_unfixable", False))
+    try:
+        return jsonify(_live.repair_model(u, s, delete_if_unfixable=delete))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/live/repair_all", methods=["POST"])
+def api_live_repair_all():
+    """Sweep every live recording folder. Optionally limit to files modified
+    in the last `only_recent_hours` (good for periodic scheduled runs)."""
+    if not _live:
+        return jsonify({"error": "live recording unavailable"}), 503
+    body = request.get_json(silent=True) or {}
+    delete = bool(body.get("delete_if_unfixable", False))
+    recent = float(body.get("only_recent_hours", 0))
+    try:
+        return jsonify(_live.repair_all(
+            delete_if_unfixable=delete, only_recent_hours=recent))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/tor", methods=["POST"])

@@ -1194,6 +1194,70 @@ INDEX_HTML = r"""
   .drive-legend #disk-lbl-warn.warn { color: var(--warn); font-weight: 600; }
   .drive-legend #disk-lbl-warn.bad  { color: var(--bad);  font-weight: 600; }
 
+  /* Repair progress banner (Live tab) */
+  .repair-banner {
+    background: linear-gradient(180deg, #0e2036, #0b1726);
+    border: 1px solid #1e4773; border-radius: 12px;
+    padding: 12px 16px; margin-bottom: 14px;
+  }
+  .repair-banner.done { background: linear-gradient(180deg, #0d2916, #10141c); border-color: #2f7d42; }
+  .repair-banner.error { background: linear-gradient(180deg, #29100d, #1a0f14); border-color: #6b2a2a; }
+  .repair-banner-inner { display: flex; flex-direction: column; gap: 8px; }
+  .repair-banner-head {
+    display: flex; align-items: center; gap: 8px; font-size: 13px;
+  }
+  .repair-banner-title { font-weight: 600; color: var(--accent); }
+  .repair-banner.done .repair-banner-title { color: var(--good); }
+  .repair-banner.error .repair-banner-title { color: var(--bad); }
+  .repair-banner-pct {
+    font-family: "JetBrains Mono", monospace; font-size: 12px; color: var(--text-2);
+    margin-left: auto;
+  }
+  .repair-banner-elapsed {
+    font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--text-3);
+  }
+  .repair-progress-bar {
+    height: 6px; background: #0a0e18; border-radius: 3px; overflow: hidden;
+    border: 1px solid #1c2438;
+  }
+  .repair-progress-bar .fill {
+    height: 100%; width: 0;
+    background: linear-gradient(90deg, var(--accent-2), var(--accent), var(--purple));
+    background-size: 200% 100%; animation: shimmer 2.5s linear infinite;
+    transition: width .3s;
+  }
+  .repair-banner.done .repair-progress-bar .fill {
+    animation: none;
+    background: var(--good);
+  }
+  .repair-banner-body {
+    display: flex; align-items: baseline; gap: 10px; font-size: 11.5px;
+  }
+  .repair-current {
+    flex: 1; color: var(--text-3); font-family: "JetBrains Mono", monospace;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .repair-counts {
+    display: inline-flex; gap: 6px; flex-wrap: wrap;
+  }
+  .repair-counts .repair-chip {
+    padding: 1px 7px; border-radius: 10px; font-size: 10.5px;
+    background: #121826; color: var(--text-2); border: 1px solid var(--border);
+    font-family: "JetBrains Mono", monospace;
+  }
+  .repair-counts .repair-chip.ok        { background: #0b1320; color: var(--text-3); }
+  .repair-counts .repair-chip.remuxed   { background: #0d2916; color: #5ee2a6; border-color: #145a3b; }
+  .repair-counts .repair-chip.reencoded { background: #0e1e2e; color: #7fd0ff; border-color: #1d4468; }
+  .repair-counts .repair-chip.deleted   { background: #2a1211; color: #ff9595; border-color: #6b2a2a; }
+  .repair-counts .repair-chip.failed    { background: #1f1508; color: var(--warn); border-color: #5a4a1e; }
+
+  .repair-spin {
+    animation: repair-spin 2s linear infinite;
+    color: var(--accent);
+  }
+  .repair-banner.done .repair-spin { animation: none; color: var(--good); }
+  @keyframes repair-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
   /* Danger zone (history reset) */
   .danger-zone-title {
     margin-top: 22px; margin-bottom: 4px; font-size: 12.5px;
@@ -1652,6 +1716,27 @@ INDEX_HTML = r"""
         <button class="chip" data-sort="name"    onclick="liveSetSort('name')">by name</button>
         <button class="chip" data-sort="site"    onclick="liveSetSort('site')">by site</button>
         <button class="chip" data-sort="size"    onclick="liveSetSort('size')">by size</button>
+      </div>
+    </div>
+
+    <!-- Repair progress banner (shown while a repair job is running) -->
+    <div id="live-repair-banner" class="repair-banner" hidden>
+      <div class="repair-banner-inner">
+        <div class="repair-banner-head">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+               stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"
+               class="repair-spin">
+            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+          </svg>
+          <span class="repair-banner-title" id="repair-banner-title">Repairing...</span>
+          <span class="repair-banner-pct" id="repair-banner-pct">0%</span>
+          <span class="repair-banner-elapsed" id="repair-banner-elapsed"></span>
+        </div>
+        <div class="repair-progress-bar"><div class="fill" id="repair-bar-fill"></div></div>
+        <div class="repair-banner-body">
+          <div class="repair-current" id="repair-current">—</div>
+          <div class="repair-counts" id="repair-counts"></div>
+        </div>
       </div>
     </div>
 
@@ -2695,6 +2780,8 @@ function switchTab(page) {
   if (page === 'live') {
     liveLoadSites();
     liveRefresh();
+    // Resume progress banner if a repair job is already running
+    _checkExistingRepair();
   }
   // Update URL hash so it's shareable / refresh-friendly
   if (history.replaceState) history.replaceState(null, '', '#' + page);
@@ -3038,37 +3125,116 @@ async function liveOpenFolder(username, siteSlug) {
 }
 
 // ── Live repair: 3-tier ffmpeg pipeline (check → remux → re-encode → delete)
-function _repairSummary(r) {
-  const c = r.counts || {};
+let _repairPollTimer = null;
+
+function _repairCountsHtml(c) {
   const parts = [];
-  if (c.ok)        parts.push(`${c.ok} already OK`);
+  if (c.ok)        parts.push(`<span class="repair-chip ok">${c.ok} ok</span>`);
+  if (c.remuxed)   parts.push(`<span class="repair-chip remuxed">${c.remuxed} remuxed</span>`);
+  if (c.reencoded) parts.push(`<span class="repair-chip reencoded">${c.reencoded} re-encoded</span>`);
+  if (c.deleted)   parts.push(`<span class="repair-chip deleted">${c.deleted} deleted</span>`);
+  if (c.failed)    parts.push(`<span class="repair-chip failed">${c.failed} still broken</span>`);
+  return parts.join('');
+}
+
+function _repairSummaryText(s) {
+  const c = s.counts || {};
+  const parts = [];
+  if (c.ok)        parts.push(`${c.ok} already ok`);
   if (c.remuxed)   parts.push(`<b style="color:var(--good)">${c.remuxed} remuxed</b>`);
-  if (c.reencoded) parts.push(`<b style="color:var(--accent)">${c.reencoded} re-encoded</b>`);
-  if (c.deleted)   parts.push(`<b style="color:var(--bad)">${c.deleted} deleted</b> (unrepairable)`);
+  if (c.reencoded) parts.push(`<b style="color:#7fd0ff">${c.reencoded} re-encoded</b>`);
+  if (c.deleted)   parts.push(`<b style="color:var(--bad)">${c.deleted} deleted</b>`);
   if (c.failed)    parts.push(`<b style="color:var(--warn)">${c.failed} still broken</b>`);
   if (!parts.length) parts.push('no files found to repair');
-  return `Scanned <b>${r.total || 0}</b> files: ` + parts.join(' · ');
+  return `Scanned <b>${s.total || 0}</b> files · ` + parts.join(' · ');
+}
+
+function _fmtElapsed(startIso, endIso) {
+  if (!startIso) return '';
+  const start = new Date(startIso).getTime();
+  const end = endIso ? new Date(endIso).getTime() : Date.now();
+  const sec = Math.max(0, Math.floor((end - start) / 1000));
+  if (sec < 60) return sec + 's';
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return m + 'm ' + (s < 10 ? '0' : '') + s + 's';
+}
+
+async function _pollRepair() {
+  try {
+    const s = await api('/api/live/repair/status');
+    const banner = document.getElementById('live-repair-banner');
+    // Stage: idle → nothing to show (but keep last-finished snapshot briefly)
+    if (!s.active && s.stage !== 'finished' && s.stage !== 'error') {
+      banner.hidden = true;
+      if (_repairPollTimer) { clearInterval(_repairPollTimer); _repairPollTimer = null; }
+      return;
+    }
+    banner.hidden = false;
+    banner.classList.remove('done', 'error');
+    const title = document.getElementById('repair-banner-title');
+    const pct = document.getElementById('repair-banner-pct');
+    const elapsed = document.getElementById('repair-banner-elapsed');
+    const fill = document.getElementById('repair-bar-fill');
+    const cur = document.getElementById('repair-current');
+    const counts = document.getElementById('repair-counts');
+
+    const scopeLabel = s.scope === 'all' ? 'Repairing all recordings'
+                     : s.scope.startsWith('model:') ? 'Repairing ' + s.scope.slice(6).split('|')[0]
+                     : 'Repair';
+    const stageLabel = {
+      starting: 'starting…', listing: 'scanning folder…',
+      start: 'processing', done: 'processing',
+      finished: 'done', error: 'error',
+    }[s.stage] || s.stage;
+
+    title.textContent = `${scopeLabel} — ${stageLabel}`;
+    const p = s.total > 0 ? Math.min(100, Math.round(100 * s.current / s.total)) : 0;
+    pct.textContent = s.total ? `${s.current}/${s.total} (${p}%)` : '';
+    elapsed.textContent = _fmtElapsed(s.started_at, s.finished_at);
+    fill.style.width = p + '%';
+    cur.textContent = s.current_file || (s.stage === 'listing' ? 'listing files…' : '');
+    counts.innerHTML = _repairCountsHtml(s.counts || {});
+
+    if (s.stage === 'finished') {
+      banner.classList.add('done');
+      fill.style.width = '100%';
+      // Show a summary toast once
+      if (_repairPollTimer) { clearInterval(_repairPollTimer); _repairPollTimer = null; }
+      toast('Repair complete', 'success');
+      // Auto-hide the banner after 15s (leave it visible so user can read counts)
+      setTimeout(() => { if (!_repairPollTimer) banner.hidden = true; }, 15000);
+    } else if (s.stage === 'error') {
+      banner.classList.add('error');
+      if (_repairPollTimer) { clearInterval(_repairPollTimer); _repairPollTimer = null; }
+      toast('Repair failed — see log', 'error');
+    }
+  } catch (e) {
+    console.error('repair poll', e);
+  }
+}
+function _startRepairPolling() {
+  if (_repairPollTimer) clearInterval(_repairPollTimer);
+  _pollRepair();   // immediate first call
+  _repairPollTimer = setInterval(_pollRepair, 700);
 }
 
 async function liveRepair(username, site) {
   const ok = await confirmDialog(
     `Check every recording for <b>${escapeHtml(username)}</b> on <b>${escapeHtml(site)}</b>?<br><br>` +
-    `Tier 1 (ffprobe): validate playability.<br>` +
-    `Tier 2 (ffmpeg remux): fix missing moov atoms — no quality loss.<br>` +
-    `Tier 3 (ffmpeg re-encode): last-resort full re-encode.<br>` +
-    `<br>Files the recorder is currently writing to are skipped.`,
+    `<b>Tier 1</b> (ffprobe): validate playability.<br>` +
+    `<b>Tier 2</b> (ffmpeg remux): fix missing moov atoms — no quality loss.<br>` +
+    `<b>Tier 3</b> (ffmpeg re-encode): last-resort full re-encode.<br>` +
+    `<br>Progress appears at the top of the Live tab. ` +
+    `Files the recorder is currently writing to are skipped.`,
     {title: 'Repair recordings', tone: 'info',
      confirmLabel: 'Repair', cancelLabel: 'Cancel'});
   if (!ok) return;
-  toast('Repair running... this may take a minute');
   try {
     const r = await api('/api/live/repair', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({username, site, delete_if_unfixable: false})});
     if (r.error) { toast('Error: ' + r.error, 'error'); return; }
-    await confirmDialog(_repairSummary(r),
-      {title:`${username} · repair complete`, tone:'info',
-       confirmLabel:'OK', hideCancel:true});
+    _startRepairPolling();
   } catch(e) { toast('Error: '+e.message, 'error'); }
 }
 
@@ -3076,22 +3242,31 @@ async function liveRepairAll() {
   const deleteUnfixable = await confirmDialog(
     `Sweep every model's recording folder and repair every video.<br><br>` +
     `<b>Delete unfixable files?</b><br>` +
-    `If <b>YES</b>: files that even a full re-encode can't save are deleted (e.g. truncated-to-header stubs).<br>` +
-    `If <b>NO</b>: broken files stay on disk and are just flagged in the report.<br><br>` +
-    `Files currently being recorded are always skipped.`,
+    `<b>YES</b> — files that even a full re-encode can't save are deleted (truncated header stubs etc).<br>` +
+    `<b>NO</b> — broken files stay on disk, flagged in the counts only.<br><br>` +
+    `Files currently being recorded are skipped either way.`,
     {title: 'Repair all recordings', tone: 'warn',
      confirmLabel: 'YES — delete unfixable', cancelLabel: 'Keep broken files'});
-  // Note: with hideCancel=false, cancelLabel click resolves false, confirmLabel resolves true
-  toast('Sweep running... check the log for progress');
+  // User chose: confirmLabel → true (delete); cancelLabel → false (keep);
+  // backdrop/escape → false (treated as "keep", not a cancel of the whole
+  // operation — adjust below if you'd rather treat escape as cancel).
   try {
     const r = await api('/api/live/repair_all', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({delete_if_unfixable: !!deleteUnfixable})});
     if (r.error) { toast('Error: ' + r.error, 'error'); return; }
-    await confirmDialog(_repairSummary(r),
-      {title:'Repair all · complete', tone:'info',
-       confirmLabel:'OK', hideCancel:true});
+    _startRepairPolling();
   } catch(e) { toast('Error: '+e.message, 'error'); }
+}
+
+// Start polling on page load if a job is already running (e.g. after refresh)
+async function _checkExistingRepair() {
+  try {
+    const s = await api('/api/live/repair/status');
+    if (s.active || s.stage === 'finished' || s.stage === 'error') {
+      _startRepairPolling();
+    }
+  } catch(e) { /* no live backend */ }
 }
 async function openLocalPath(path) {
   // Generic "open this file/folder on disk" helper used across the UI.
@@ -4246,10 +4421,8 @@ def api_live_toggle_all():
 
 @app.route("/api/live/repair", methods=["POST"])
 def api_live_repair():
-    """Run video-repair pipeline on one model's recordings.
-
-    Body: {"username", "site", "delete_if_unfixable": false}
-    Returns counts of ok / remuxed / reencoded / deleted / failed files."""
+    """Kick off a repair job for one model. Returns immediately — the UI
+    polls /api/live/repair/status for progress."""
     if not _live:
         return jsonify({"error": "live recording unavailable"}), 503
     body = request.get_json(force=True) or {}
@@ -4266,8 +4439,8 @@ def api_live_repair():
 
 @app.route("/api/live/repair_all", methods=["POST"])
 def api_live_repair_all():
-    """Sweep every live recording folder. Optionally limit to files modified
-    in the last `only_recent_hours` (good for periodic scheduled runs)."""
+    """Kick off a full-sweep repair. Returns immediately — poll
+    /api/live/repair/status for progress (current file, counts so far)."""
     if not _live:
         return jsonify({"error": "live recording unavailable"}), 503
     body = request.get_json(silent=True) or {}
@@ -4278,6 +4451,27 @@ def api_live_repair_all():
             delete_if_unfixable=delete, only_recent_hours=recent))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/live/repair/status")
+def api_live_repair_status():
+    """Current repair job progress. The UI polls this while a job is running.
+
+    Response shape:
+      {
+        active: bool,
+        scope: "model:<u>|<site>" | "all" | "",
+        stage: "idle" | "listing" | "start" | "done" | "finished" | "error",
+        current: int, total: int,
+        current_file: str,
+        started_at: ISO, finished_at: ISO,
+        counts: {ok, remuxed, reencoded, deleted, failed},
+        last_result: RepairResult | null,
+        results: [RepairResult] | null (populated on finish)
+      }"""
+    if not _live:
+        return jsonify({"error": "live recording unavailable"}), 503
+    return jsonify(_live.repair_progress())
 
 
 @app.route("/api/tor", methods=["POST"])

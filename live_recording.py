@@ -242,46 +242,142 @@ class LiveManager:
         slug = getattr(site_cls, "siteslug", site) if site_cls else site
         return self.live_dir / f"{username} [{slug}]"
 
+    # ── Repair progress state (background thread + UI polling) ─────
+    # One repair job at a time. Keyed only by "scope" (one model vs sweep).
+    _repair_state: Dict[str, Any] = {
+        "active": False,
+        "scope": "",           # "model:user|site" or "all"
+        "stage": "idle",       # idle | listing | repairing | finished | error
+        "current": 0,
+        "total": 0,
+        "current_file": "",
+        "started_at": "",
+        "finished_at": "",
+        "counts": {"ok": 0, "remuxed": 0, "reencoded": 0, "deleted": 0, "failed": 0},
+        "last_result": None,   # most recent RepairResult as dict
+        "results": [],         # full list, populated at end
+        "folder": "",
+        "delete_if_unfixable": False,
+    }
+    _repair_lock = threading.Lock()
+
+    @classmethod
+    def repair_progress(cls) -> Dict[str, Any]:
+        """Snapshot of current repair state for the UI to poll."""
+        with cls._repair_lock:
+            return json.loads(json.dumps(cls._repair_state))  # deep copy
+
+    def _repair_progress_cb(self, stage: str, cur: int, total: int,
+                              path: str, partial):
+        """Passed to video_repair.sweep_folder. Updates the class-level
+        shared state on each progress event."""
+        from video_repair import RepairResult
+        with self._repair_lock:
+            s = self._repair_state
+            s["stage"] = stage
+            s["current"] = cur
+            s["total"] = total
+            if path:
+                s["current_file"] = os.path.basename(path)
+            if partial and isinstance(partial, RepairResult):
+                s["counts"][partial.action] = s["counts"].get(partial.action, 0) + 1
+                s["last_result"] = {
+                    "path": partial.path,
+                    "action": partial.action,
+                    "reason": partial.reason,
+                    "duration_s": partial.duration_s,
+                    "before_size": partial.before_size,
+                    "after_size": partial.after_size,
+                    "elapsed_s": partial.elapsed_s,
+                }
+
+    def _run_repair_job(self, *, folder: Path, scope: str,
+                         delete_if_unfixable: bool,
+                         only_recent_hours: float = 0.0) -> None:
+        """Runs inside a background thread. Writes into _repair_state so
+        the UI can poll /api/live/repair/status."""
+        import video_repair
+        now_iso = lambda: __import__("datetime").datetime.now().replace(
+            microsecond=0).isoformat()
+        with self._repair_lock:
+            self._repair_state.update({
+                "active": True, "scope": scope, "stage": "starting",
+                "current": 0, "total": 0, "current_file": "",
+                "started_at": now_iso(), "finished_at": "",
+                "counts": {"ok": 0, "remuxed": 0, "reencoded": 0,
+                            "deleted": 0, "failed": 0},
+                "last_result": None, "results": [],
+                "folder": str(folder),
+                "delete_if_unfixable": bool(delete_if_unfixable),
+            })
+        try:
+            results = video_repair.sweep_folder(
+                str(folder), recursive=True,
+                delete_if_unfixable=delete_if_unfixable,
+                only_recent_seconds=only_recent_hours * 3600 if only_recent_hours else 0,
+                skip_if_locked=True, log=log,
+                progress_cb=self._repair_progress_cb,
+            )
+            with self._repair_lock:
+                self._repair_state["results"] = [
+                    {
+                        "path": r.path, "action": r.action, "reason": r.reason,
+                        "duration_s": r.duration_s,
+                        "before_size": r.before_size, "after_size": r.after_size,
+                        "elapsed_s": r.elapsed_s,
+                    } for r in results
+                ]
+                self._repair_state["stage"] = "finished"
+                self._repair_state["finished_at"] = now_iso()
+                self._repair_state["active"] = False
+        except Exception as e:
+            log.error(f"[live] repair job crashed: {e}")
+            with self._repair_lock:
+                self._repair_state["stage"] = "error"
+                self._repair_state["current_file"] = f"error: {e}"
+                self._repair_state["finished_at"] = now_iso()
+                self._repair_state["active"] = False
+
     def repair_model(self, username: str, site: str, *,
                       delete_if_unfixable: bool = False) -> Dict[str, Any]:
-        """Run the 3-tier repair pipeline over one model's recordings folder.
-        Skips files that are currently locked by the recorder."""
-        try:
-            import video_repair
-        except ImportError as e:
-            return {"error": f"video_repair import failed: {e}"}
+        """Kick off a background repair of this model's folder.
+        Returns immediately with a status handle — poll /api/live/repair/status
+        for progress."""
+        with self._repair_lock:
+            if self._repair_state["active"]:
+                return {"error": "another repair job is running",
+                        "scope": self._repair_state["scope"]}
         folder = self.model_folder(username, site)
         if not folder.exists():
-            return {"error": f"no folder at {folder}", "username": username, "site": site}
-        log.info(f"[live] repair sweep: {folder}")
-        results = video_repair.sweep_folder(
-            str(folder), recursive=True,
-            delete_if_unfixable=delete_if_unfixable,
-            skip_if_locked=True, log=log,
+            return {"error": f"no folder at {folder}",
+                    "username": username, "site": site}
+        scope = f"model:{username}|{site}"
+        t = threading.Thread(
+            target=self._run_repair_job,
+            kwargs={"folder": folder, "scope": scope,
+                     "delete_if_unfixable": delete_if_unfixable},
+            daemon=True, name=f"repair-{username}",
         )
-        summary = video_repair.summarize(results)
-        summary["username"] = username
-        summary["site"] = site
-        summary["folder"] = str(folder)
-        return summary
+        t.start()
+        return {"ok": True, "scope": scope, "folder": str(folder), "started": True}
 
     def repair_all(self, *, delete_if_unfixable: bool = False,
                     only_recent_hours: float = 0.0) -> Dict[str, Any]:
-        """Sweep every model's folder under the live directory. Optionally
-        limit to files modified in the last N hours (for frequent
-        scheduled runs that shouldn't re-touch old recordings)."""
-        try:
-            import video_repair
-        except ImportError as e:
-            return {"error": f"video_repair import failed: {e}"}
-        log.info(f"[live] repair-all sweep: {self.live_dir} (recent_hours={only_recent_hours})")
-        results = video_repair.sweep_folder(
-            str(self.live_dir), recursive=True,
-            delete_if_unfixable=delete_if_unfixable,
-            only_recent_seconds=only_recent_hours * 3600 if only_recent_hours else 0,
-            skip_if_locked=True, log=log,
+        """Kick off a background sweep of the whole live directory."""
+        with self._repair_lock:
+            if self._repair_state["active"]:
+                return {"error": "another repair job is running",
+                        "scope": self._repair_state["scope"]}
+        t = threading.Thread(
+            target=self._run_repair_job,
+            kwargs={"folder": self.live_dir, "scope": "all",
+                     "delete_if_unfixable": delete_if_unfixable,
+                     "only_recent_hours": only_recent_hours},
+            daemon=True, name="repair-all",
         )
-        return video_repair.summarize(results)
+        t.start()
+        return {"ok": True, "scope": "all", "folder": str(self.live_dir),
+                "started": True}
 
     @staticmethod
     def key_of(username: str, site: str) -> str:

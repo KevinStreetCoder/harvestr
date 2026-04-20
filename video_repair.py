@@ -336,18 +336,27 @@ def sweep_folder(folder: str, *,
                   delete_if_unfixable: bool = False,
                   only_recent_seconds: float = 0.0,
                   skip_if_locked: bool = True,
-                  log: Optional[logging.Logger] = None) -> List[RepairResult]:
-    """Run repair_file() over every video in `folder`. Useful as a
-    scheduled sweep or manual "repair everything" action.
+                  log: Optional[logging.Logger] = None,
+                  progress_cb=None) -> List[RepairResult]:
+    """Run repair_file() over every video in `folder`.
 
-    recursive: walk subdirectories too
-    only_recent_seconds: if > 0, only process files modified in the last N s
-    skip_if_locked: on Windows, an actively-recording file is locked; skip
-                    those (they'll be repaired when recording ends)."""
+    progress_cb(stage, current_index, total, current_path, partial_result)
+        Optional callback called at each stage:
+          stage="listing"  — scanning the folder for files
+          stage="start"    — about to process file `current_path`
+          stage="done"     — finished processing file; partial_result is
+                             the RepairResult just added
+          stage="finished" — all files processed
+    """
     root = Path(folder)
     results: List[RepairResult] = []
     if not root.exists():
+        if progress_cb:
+            progress_cb("finished", 0, 0, "", None)
         return results
+
+    if progress_cb:
+        progress_cb("listing", 0, 0, str(root), None)
 
     paths: List[Path] = []
     iter_ = root.rglob("*") if recursive else root.iterdir()
@@ -375,10 +384,13 @@ def sweep_folder(folder: str, *,
             continue
         paths.append(p)
 
+    total = len(paths)
     if log:
-        log.info(f"  [repair] sweeping {len(paths)} files in {root}")
+        log.info(f"  [repair] sweeping {total} files in {root}")
 
-    for p in paths:
+    for i, p in enumerate(paths, 1):
+        if progress_cb:
+            progress_cb("start", i, total, str(p), None)
         try:
             r = repair_file(str(p),
                              delete_if_unfixable=delete_if_unfixable,
@@ -387,8 +399,14 @@ def sweep_folder(folder: str, *,
         except Exception as e:
             if log:
                 log.error(f"  [repair] {p.name} raised: {e}")
-            results.append(RepairResult(path=str(p), action="failed",
-                                         reason=f"exception: {e}"))
+            r = RepairResult(path=str(p), action="failed",
+                              reason=f"exception: {e}")
+            results.append(r)
+        if progress_cb:
+            progress_cb("done", i, total, str(p), r)
+
+    if progress_cb:
+        progress_cb("finished", total, total, "", None)
     return results
 
 

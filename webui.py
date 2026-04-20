@@ -327,8 +327,11 @@ INDEX_HTML = r"""
     background: linear-gradient(180deg, #151a25, #10141c);
     padding: 12px 24px; border-bottom: 1px solid var(--border);
     display: flex; align-items: center; gap: 14px;
-    position: sticky; top: 0; z-index: 20;
+    position: sticky; top: 0; z-index: 500;
     backdrop-filter: blur(8px);
+    /* overflow: visible is the default but the sticky + backdrop-filter
+       still creates a stacking context that traps tooltips to within its
+       own layer. Keep nothing here that clips (no overflow: hidden). */
   }
   .brand { display: flex; align-items: center; gap: 10px; }
   .brand svg { width: 30px; height: 30px; }
@@ -619,6 +622,30 @@ INDEX_HTML = r"""
   }
   @keyframes tip-in { from { opacity: 0; transform: translateX(-50%) translateY(2px); }
                         to   { opacity: 1; transform: translateX(-50%) translateY(0); } }
+  @keyframes tip-in-down { from { opacity: 0; transform: translateX(-50%) translateY(-2px); }
+                            to   { opacity: 1; transform: translateX(-50%) translateY(0); } }
+
+  /* Tooltips on header buttons: flip to BELOW the element, since going
+     above would put them off the top of the viewport (header is sticky-top-0).
+     Also applies to any element explicitly marked data-tip-pos="bottom". */
+  header [data-tip]:hover::after,
+  header [data-tip]:focus-visible::after,
+  [data-tip-pos="bottom"][data-tip]:hover::after,
+  [data-tip-pos="bottom"][data-tip]:focus-visible::after {
+    bottom: auto;
+    top: calc(100% + 6px);
+    animation-name: tip-in-down;
+  }
+  header [data-tip]:hover::before,
+  header [data-tip]:focus-visible::before,
+  [data-tip-pos="bottom"][data-tip]:hover::before,
+  [data-tip-pos="bottom"][data-tip]:focus-visible::before {
+    bottom: auto;
+    top: calc(100% + 2px);
+    border-top-color: transparent;
+    border-bottom-color: var(--border-2);
+    animation-name: tip-in-down;
+  }
 
   /* Cards need visible overflow so tooltips can escape — but inner panels
      with internal scroll areas keep their overflow for real content. */
@@ -2537,23 +2564,32 @@ function showDialog(opts) {
 function dialogConfirm() {
   const inputWrap = document.getElementById('dialog-input-wrap');
   const value = inputWrap.hidden ? true : document.getElementById('dialog-input').value;
-  closeDialog();
-  if (_dialogResolver) { _dialogResolver(value); _dialogResolver = null; }
+  // Snapshot + clear resolver FIRST, so closeDialog doesn't see it as a
+  // backdrop-cancel and resolve the promise with `false` instead of our value.
+  const resolver = _dialogResolver;
+  _dialogResolver = null;
+  document.getElementById('dialog-modal').classList.remove('show');
+  if (resolver) resolver(value);
 }
 function dialogCancel() {
   const inputWrap = document.getElementById('dialog-input-wrap');
   const value = inputWrap.hidden ? false : null;
-  closeDialog();
-  if (_dialogResolver) { _dialogResolver(value); _dialogResolver = null; }
+  const resolver = _dialogResolver;
+  _dialogResolver = null;
+  document.getElementById('dialog-modal').classList.remove('show');
+  if (resolver) resolver(value);
 }
 function closeDialog(e) {
+  // Called by backdrop click or Escape key. Ignore clicks that landed on
+  // the dialog body itself (only the outer #dialog-modal backdrop counts).
   if (e && e.target && e.target.id !== 'dialog-modal') return;
   document.getElementById('dialog-modal').classList.remove('show');
   if (_dialogResolver) {
     // Backdrop/Escape close counts as cancel
     const inputWrap = document.getElementById('dialog-input-wrap');
-    _dialogResolver(inputWrap.hidden ? false : null);
+    const resolver = _dialogResolver;
     _dialogResolver = null;
+    resolver(inputWrap.hidden ? false : null);
   }
 }
 

@@ -3074,10 +3074,37 @@ async function liveLoadSites() {
 }
 
 async function liveRefresh() {
+  // 2026-05-10: bypass api() helper which calls r.json() — browser
+  // extensions (cookie-extractors, password managers) wrap fetch and
+  // sometimes throw mid-parse on the larger Live response (660 KB).
+  // When that happens the catch returns early, so renderLiveModels()
+  // never runs and the table stays empty even though the request
+  // succeeded server-side. Fall back to manual JSON.parse on r.text()
+  // to bypass whatever the extension monkey-patched onto Response.
   try {
-    _liveSnapshot = await api('/api/live/status');
+    const r = await fetch('/api/live/status');
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    let data;
+    try {
+      data = await r.json();
+    } catch (parseErr) {
+      // Extension-induced parse failure — try the raw text path
+      try {
+        const txt = await r.text();
+        data = JSON.parse(txt);
+      } catch (rawErr) {
+        console.error('liveRefresh: both r.json() and JSON.parse(r.text()) failed',
+                      parseErr, rawErr);
+        // Don't return — keep the previous _liveSnapshot so the UI
+        // doesn't blank out on a single transient extension hiccup.
+        renderLiveModels();
+        return;
+      }
+    }
+    _liveSnapshot = data;
   } catch(e) {
     console.error('liveRefresh failed', e);
+    renderLiveModels();
     return;
   }
   console.debug('[live] status: total=' + (_liveSnapshot.summary?.total ?? 0)
@@ -3145,7 +3172,12 @@ function renderLiveModels() {
     return;
   }
 
-  root.innerHTML = models.map(m => {
+  // 2026-05-10: render each model card inside its own try/catch so a
+  // single record with unexpected data shape (null tags, missing
+  // status_color, etc.) can't crash the whole list and leave the UI
+  // empty. Failed cards become a small placeholder showing the user
+  // SOMETHING for that key with a console error for debugging.
+  const renderOne = (m) => {
     const dot = `<span class="state-dot ${m.status_color}" aria-hidden="true"></span>`;
     const cls = [];
     if (m.recording) cls.push('recording');
@@ -3268,6 +3300,20 @@ function renderLiveModels() {
       ${freqGrid}
       <div class="actions">${actions}</div>
     </div>`;
+  };
+
+  root.innerHTML = models.map(m => {
+    try {
+      return renderOne(m);
+    } catch (err) {
+      console.error('renderLiveModels: card failed for', m && m.key, err);
+      const u = (m && m.username) || '?';
+      const s = (m && m.site) || '?';
+      return `<div class="model-card" style="opacity:.5;">
+        <div class="model-name">${escapeHtml(u)}</div>
+        <div class="status-row"><span class="state-label bad">render error</span>
+          <span class="site-chip">${escapeHtml(s)}</span></div></div>`;
+    }
   }).join('');
 }
 

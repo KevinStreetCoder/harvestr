@@ -7,17 +7,38 @@
 # service. Install with: pip install patchright && patchright install chromium
 
 import json
+import logging
+import sys
 import time
 from pathlib import Path
 from typing import Iterable, Dict
 
+# Lazy auto-installer for patchright. The helper sits next to the
+# universal/ project root; reach it via a small sys.path nudge so this
+# nested module can import it without an explicit package path.
+_LOG = logging.getLogger(__name__)
+_THIS_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _THIS_DIR.parents[3]  # cf_broker.py -> utils -> streamonitor -> live_backend -> universal
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 try:
-    # Drop-in async API. `TimeoutError` is identical to playwright's.
-    from patchright.async_api import async_playwright, TimeoutError as PlaywrightTimeout  # type: ignore
-    _USE_PATCHRIGHT = True
+    from _patchright_setup import ensure_patchright_async  # type: ignore
 except ImportError:
+    ensure_patchright_async = None  # type: ignore
+
+_USE_PATCHRIGHT = False
+async_playwright = None  # type: ignore
+PlaywrightTimeout = None  # type: ignore
+
+if ensure_patchright_async is not None and ensure_patchright_async(_LOG):
+    try:
+        from patchright.async_api import async_playwright, TimeoutError as PlaywrightTimeout  # type: ignore
+        _USE_PATCHRIGHT = True
+    except ImportError:
+        pass
+
+if async_playwright is None:
     from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
-    _USE_PATCHRIGHT = False
 
 COOKIES_DIR = Path("cookies")
 COOKIES_DIR.mkdir(parents=True, exist_ok=True)

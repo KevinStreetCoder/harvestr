@@ -152,6 +152,39 @@ winget install aria2.aria2
 # Download from https://www.gyan.dev/ffmpeg/builds/ and add to PATH
 ```
 
+### Stealth browser tier (optional, auto-installed)
+
+The browser-extraction code paths (`embed_extractors.py`,
+`live_backend/streamonitor/utils/cf_broker.py`) prefer
+[**patchright**](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright) — a
+Playwright fork with stealth patches that frequently lets invisible-managed
+Cloudflare Turnstile auto-pass without a captcha service.
+
+You don't need to install it manually. The first time the browser tier
+runs and finds patchright missing, it will run **once** per machine:
+
+```
+pip install patchright
+patchright install chromium     # ~180 MB Chromium download
+```
+
+…then continue normally. The outcome is cached for the rest of the
+process; subsequent calls hit the in-memory cache instantly. If the
+install fails (offline, pip blocked, mirror down) the code falls back
+to vanilla `playwright` silently — nothing breaks, you just lose the
+stealth advantage on Cloudflare-protected hosts.
+
+Forcing the install up-front is also fine:
+
+```powershell
+pip install patchright
+patchright install chromium
+```
+
+Either way, the code auto-detects at import. On startup the log shows
+which driver is in use (`Browser driver: patchright (stealth)` vs the
+vanilla-playwright fallback).
+
 ### Clone
 
 ```powershell

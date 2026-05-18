@@ -485,13 +485,24 @@ def _ensure_playwright(log: Optional[logging.Logger] = None):
         return _PW_PLAYWRIGHT, _PW_CTX
     sync_playwright = None
     use_patchright = False
+    # Try patchright first. If it isn't installed yet, attempt the
+    # one-time auto-install (pip install patchright + patchright install
+    # chromium). The helper caches the outcome so this is a no-op on
+    # subsequent calls in the same process.
     try:
-        from patchright.sync_api import sync_playwright as _sp  # type: ignore
-        sync_playwright = _sp
-        use_patchright = True
-        if log:
-            log.debug("  Using patchright (stealth) for browser tier")
+        from _patchright_setup import ensure_patchright_sync  # type: ignore
     except ImportError:
+        ensure_patchright_sync = None  # type: ignore
+    if ensure_patchright_sync is not None and ensure_patchright_sync(log):
+        try:
+            from patchright.sync_api import sync_playwright as _sp  # type: ignore
+            sync_playwright = _sp
+            use_patchright = True
+            if log:
+                log.debug("  Using patchright (stealth) for browser tier")
+        except ImportError:
+            pass
+    if sync_playwright is None:
         try:
             from playwright.sync_api import sync_playwright as _sp
             sync_playwright = _sp

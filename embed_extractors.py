@@ -463,45 +463,93 @@ _STEALTH_INIT_SCRIPT = r"""
 
 def _ensure_playwright(log: Optional[logging.Logger] = None):
     """Lazy-init a headless-Chromium context. Returns (playwright, context)
-    or (None, None) if Playwright isn't installed / fails to launch."""
+    or (None, None) if Playwright isn't installed / fails to launch.
+
+    Prefer `patchright` over vanilla `playwright` when installed.
+    patchright is a community Playwright fork whose stealth patches
+    frequently let invisible-managed Cloudflare Turnstile auto-pass
+    without any captcha service. Install:
+      pip install patchright && patchright install chromium
+
+    Stealth applies only when patchright LAUNCHES the browser itself
+    (not when attaching over CDP), and only when it uses
+    `launch_persistent_context` — so the patchright branch below
+    routes through there. The init-script-based stealth we apply for
+    vanilla Playwright is deliberately SKIPPED on the patchright
+    branch (layering on top breaks navigator.* enough to produce
+    net::ERR_NAME_NOT_RESOLVED on subsequent goto calls)."""
     global _PW_CTX, _PW_PLAYWRIGHT, _PW_AVAILABLE
     if _PW_AVAILABLE is False:
         return None, None
     if _PW_CTX is not None:
         return _PW_PLAYWRIGHT, _PW_CTX
+    sync_playwright = None
+    use_patchright = False
     try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        _PW_AVAILABLE = False
+        from patchright.sync_api import sync_playwright as _sp  # type: ignore
+        sync_playwright = _sp
+        use_patchright = True
         if log:
-            log.debug("  Playwright not installed — browser tier disabled")
-        return None, None
+            log.debug("  Using patchright (stealth) for browser tier")
+    except ImportError:
+        try:
+            from playwright.sync_api import sync_playwright as _sp
+            sync_playwright = _sp
+        except ImportError:
+            _PW_AVAILABLE = False
+            if log:
+                log.debug("  Playwright not installed — browser tier disabled")
+            return None, None
     try:
         pw = sync_playwright().start()
-        browser = pw.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                "--no-sandbox",
-                # Reduce detection surface: Cloudflare's bot-score uses
-                # subresource integrity + automation-flag checks; these
-                # args turn off the most-fingerprintable defaults.
-                "--disable-features=IsolateOrigins,site-per-process",
-                "--disable-site-isolation-trials",
-            ],
-        )
-        ctx = browser.new_context(
-            user_agent=USER_AGENT,
-            viewport={"width": 1280, "height": 800},
-            locale="en-US",
-            # Mimic a real Chrome timezone (most automation tools leak UTC)
-            timezone_id="America/New_York",
-        )
-        # Comprehensive stealth — replaces the previous 1-line webdriver
-        # hide with a full fingerprint mask covering plugins, languages,
-        # chrome.runtime, permissions, and WebGL vendor.
-        ctx.add_init_script(_STEALTH_INIT_SCRIPT)
+        if use_patchright:
+            # patchright stealth requires launch_persistent_context.
+            # Use a dedicated profile dir so we don't clash with any
+            # legacy playwright profile state on the same machine.
+            import tempfile, os
+            profile_dir = os.path.join(
+                tempfile.gettempdir(), "harvestr_patchright_profile")
+            os.makedirs(profile_dir, exist_ok=True)
+            ctx = pw.chromium.launch_persistent_context(
+                user_data_dir=profile_dir,
+                channel="chrome",
+                headless=True,
+                user_agent=USER_AGENT,
+                viewport={"width": 1280, "height": 800},
+                locale="en-US",
+                timezone_id="America/New_York",
+                no_viewport=False,
+                args=["--no-first-run", "--no-default-browser-check"],
+            )
+            # DELIBERATELY skip _STEALTH_INIT_SCRIPT: patchright already
+            # patches the same surface, and layering ours on top has
+            # been observed to break navigator.* in Chrome 147+
+            # (subsequent goto raises net::ERR_NAME_NOT_RESOLVED).
+        else:
+            browser = pw.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                    # Reduce detection surface: Cloudflare's bot-score uses
+                    # subresource integrity + automation-flag checks; these
+                    # args turn off the most-fingerprintable defaults.
+                    "--disable-features=IsolateOrigins,site-per-process",
+                    "--disable-site-isolation-trials",
+                ],
+            )
+            ctx = browser.new_context(
+                user_agent=USER_AGENT,
+                viewport={"width": 1280, "height": 800},
+                locale="en-US",
+                # Mimic a real Chrome timezone (most automation tools leak UTC)
+                timezone_id="America/New_York",
+            )
+            # Comprehensive stealth — replaces the previous 1-line webdriver
+            # hide with a full fingerprint mask covering plugins, languages,
+            # chrome.runtime, permissions, and WebGL vendor.
+            ctx.add_init_script(_STEALTH_INIT_SCRIPT)
         _PW_PLAYWRIGHT = pw
         _PW_CTX = ctx
         _PW_AVAILABLE = True

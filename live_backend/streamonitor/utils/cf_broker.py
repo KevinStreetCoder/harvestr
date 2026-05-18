@@ -1,11 +1,23 @@
 # streamonitor/utils/cf_broker.py
 # Handles cookie minting via Playwright for Cloudflare challenges
+#
+# Prefer `patchright` over vanilla `playwright` when installed.
+# patchright is a Playwright fork whose stealth patches frequently let
+# invisible-managed Cloudflare Turnstile auto-pass without a captcha
+# service. Install with: pip install patchright && patchright install chromium
 
 import json
 import time
 from pathlib import Path
 from typing import Iterable, Dict
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+
+try:
+    # Drop-in async API. `TimeoutError` is identical to playwright's.
+    from patchright.async_api import async_playwright, TimeoutError as PlaywrightTimeout  # type: ignore
+    _USE_PATCHRIGHT = True
+except ImportError:
+    from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+    _USE_PATCHRIGHT = False
 
 COOKIES_DIR = Path("cookies")
 COOKIES_DIR.mkdir(parents=True, exist_ok=True)
@@ -59,20 +71,43 @@ async def mint_cookies_for(
     """
     try:
         async with async_playwright() as p:
-            # Use Firefox as it handles CF better sometimes
-            browser = await p.firefox.launch(
-                headless=headless,
-                args=["--disable-blink-features=AutomationControlled"]
-            )
-            
-            context = await browser.new_context(
-                user_agent=DEFAULT_UA,
-                viewport={"width": 1280, "height": 800},
-                locale="en-US",
-                java_script_enabled=True,
-                bypass_csp=True,
-            )
-            
+            # patchright stealth only applies on chromium + launch_persistent_context.
+            # When available, use that path: it bypasses invisible-managed
+            # Cloudflare Turnstile that the original Firefox path can't.
+            # Without patchright, fall back to the original Firefox launch,
+            # which historically handles classic CF challenges better.
+            cleanup_browser = None
+            if _USE_PATCHRIGHT:
+                import tempfile, os
+                profile_dir = os.path.join(
+                    tempfile.gettempdir(), "harvestr_patchright_cfbroker_profile")
+                os.makedirs(profile_dir, exist_ok=True)
+                context = await p.chromium.launch_persistent_context(
+                    user_data_dir=profile_dir,
+                    channel="chrome",
+                    headless=headless,
+                    user_agent=DEFAULT_UA,
+                    viewport={"width": 1280, "height": 800},
+                    locale="en-US",
+                    java_script_enabled=True,
+                    bypass_csp=True,
+                    args=["--no-first-run", "--no-default-browser-check"],
+                )
+                # No separate browser object to close — context owns it.
+                browser = None
+            else:
+                browser = await p.firefox.launch(
+                    headless=headless,
+                    args=["--disable-blink-features=AutomationControlled"]
+                )
+                context = await browser.new_context(
+                    user_agent=DEFAULT_UA,
+                    viewport={"width": 1280, "height": 800},
+                    locale="en-US",
+                    java_script_enabled=True,
+                    bypass_csp=True,
+                )
+
             page = await context.new_page()
             
             # Visit each URL in sequence
@@ -101,9 +136,13 @@ async def mint_cookies_for(
             
             # Get all cookies
             cookies = await context.cookies()
-            
+
             await context.close()
-            await browser.close()
+            if browser is not None:
+                # Only valid for the Firefox fallback path; the patchright
+                # launch_persistent_context owns its own browser, which
+                # is closed by context.close() above.
+                await browser.close()
 
         # Prepare data
         data = {

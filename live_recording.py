@@ -899,9 +899,24 @@ class LiveManager:
                 "recording": recording_count,
                 "total_bytes": total_sessions_bytes,
                 "status_hist": status_hist,
+                **self._disk_summary(),
             },
             "models": models,
         }
+
+    def _disk_summary(self) -> Dict[str, Any]:
+        """Free/total bytes on the recordings drive — for the UI disk gauge."""
+        try:
+            import shutil
+            du = shutil.disk_usage(str(self.live_dir))
+            return {
+                "disk_free_bytes": du.free,
+                "disk_total_bytes": du.total,
+                "disk_used_pct": round((du.used / du.total) * 100, 1) if du.total else 0,
+            }
+        except Exception:
+            return {"disk_free_bytes": None, "disk_total_bytes": None,
+                    "disk_used_pct": None}
 
     @staticmethod
     def _scrub_last_info(info: Dict[str, Any]) -> Dict[str, Any]:

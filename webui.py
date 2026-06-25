@@ -1839,6 +1839,7 @@ INDEX_HTML = r"""
       <div class="stat-box accent"><div class="value" id="live-stat-running">–</div><div class="label">Polling</div></div>
       <div class="stat-box good"><div class="value" id="live-stat-recording">–</div><div class="label">Recording now</div></div>
       <div class="stat-box warn"><div class="value" id="live-stat-size">–</div><div class="label">Recorded size</div></div>
+      <div class="stat-box" id="live-stat-disk-box"><div class="value" id="live-stat-disk">–</div><div class="label">Free on disk</div></div>
     </div>
 
     <!-- Add model + site picker -->
@@ -3123,6 +3124,22 @@ async function liveRefresh() {
   document.getElementById('live-stat-running').textContent = s.running ?? 0;
   document.getElementById('live-stat-recording').textContent = s.recording ?? 0;
   document.getElementById('live-stat-size').textContent = bytesHuman(s.total_bytes || 0);
+  // Free disk on the recordings drive, color-coded by how full it is.
+  try {
+    const box = document.getElementById('live-stat-disk-box');
+    const val = document.getElementById('live-stat-disk');
+    const free = s.disk_free_bytes, usedPct = s.disk_used_pct;
+    if (val) val.textContent = (free != null) ? bytesHuman(free) : '–';
+    if (box) {
+      box.classList.remove('good', 'warn', 'bad');
+      const lowGb = (free != null) && free < 10 * 1024 * 1024 * 1024;
+      if (usedPct != null) {
+        if (usedPct >= 92 || lowGb) box.classList.add('bad');
+        else if (usedPct >= 80) box.classList.add('warn');
+        else box.classList.add('good');
+      }
+    }
+  } catch (_) {}
   // Top bar "Live" tab badge (only show count when > 0)
   const badge = document.getElementById('tab-live-badge');
   if ((s.recording || 0) > 0) {

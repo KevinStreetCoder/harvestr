@@ -452,15 +452,24 @@ class LiveManager:
 
         def _loop() -> None:
             while True:
-                _time.sleep(20)
+                _time.sleep(15)
                 try:
                     for slug in ("CB", "SC", "CS"):
                         if _vpn.should_rotate(slug):
+                            # TIER 2: the same-IP restart didn't help -> rotate.
                             loc = _vpn.rotate(reason=f"{slug} rate-limited",
                                               log=lambda m: log.warning(m))
                             if loc:
                                 self._wake_site_bots(slug)
-                            break  # at most one rotation per watchdog cycle
+                            break  # at most one rotation per cycle
+                        elif _vpn.should_restart(slug):
+                            # TIER 1: restart (wake) the bots on the SAME IP first
+                            # -- cheap, no VPN disruption. Only escalate to a
+                            # rotation if the rate-limits keep climbing after this.
+                            _vpn.mark_restart(slug)
+                            log.warning(f"[live] [{slug}] rate-limited -> restarting bots "
+                                        f"(same IP) before any VPN rotation")
+                            self._wake_site_bots(slug)
                 except Exception as e:
                     log.debug(f"[live] vpn watchdog: {type(e).__name__}: {e}")
 

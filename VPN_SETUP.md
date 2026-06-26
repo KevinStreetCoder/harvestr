@@ -42,8 +42,10 @@ cp vpn_config.example.json vpn_config.json
   "enabled": true,
   "cli_path": null,                         // null = auto-detect; or "C:\\...\\mullvad.exe"
   "rotate_locations": ["nl","se","de","gb","ch","us"],  // mullvad codes; EMPTY = disabled
-  "ratelimit_threshold": 20,                // RATELIMIT events within the window -> rotate
+  "restart_threshold": 10,                  // TIER 1: events -> restart bots on the SAME IP
+  "rotate_threshold": 25,                   // TIER 2: events -> rotate the Mullvad exit IP
   "ratelimit_window_sec": 120,
+  "restart_cooldown_sec": 60,               // min seconds between same-IP restarts
   "rotate_cooldown_sec": 300,               // min seconds between rotations
   "connect_wait_sec": 40
 }
@@ -52,16 +54,22 @@ cp vpn_config.example.json vpn_config.json
   (`nl`), or country + city (`"us nyc"`). The rotator cycles through them.
 - Leave `rotate_locations` empty (or `enabled: false`) to turn rotation OFF.
 - Override locations without editing the file via env:
-  `STRMNTR_VPN_ROTATE="nl,se,de"` (also `STRMNTR_VPN_RL_THRESHOLD`,
-  `STRMNTR_VPN_COOLDOWN`).
+  `STRMNTR_VPN_ROTATE="nl,se,de"`.
 
-### How it triggers
+### How it triggers (TIERED — it does NOT rotate on every blip)
 Each bot reports a rate-limited status (HTTP 429 / Cloudflare 403 →
-`Status.RATELIMIT`) to the rotator. When a site exceeds `ratelimit_threshold`
-within `ratelimit_window_sec`, the LiveManager watchdog runs
-`mullvad relay set location <next>` + `mullvad connect`, waits for `Connected`,
-then **wakes that site's bots** so they immediately re-poll on the new IP.
-Rotations are throttled by `rotate_cooldown_sec`.
+`Status.RATELIMIT`) to the rotator. The LiveManager watchdog then escalates:
+1. **Tier 1 — restart (same IP).** At `restart_threshold` events in the window it
+   **wakes the site's bots** (clears their ratelimit backoff) so they re-poll
+   immediately on the *current* IP — most rate-limits are transient and this
+   fixes them with zero VPN disruption. Throttled by `restart_cooldown_sec`.
+2. **Tier 2 — rotate (new IP).** Only if the rate-limits keep climbing to
+   `rotate_threshold` (the restart didn't help) does it run
+   `mullvad relay set location <next>` + `mullvad connect`, wait for `Connected`,
+   and wake the bots onto the fresh IP. Throttled by `rotate_cooldown_sec`.
+
+So a brief 429 spike just restarts the bots; a genuinely-flagged IP escalates to
+a rotation.
 
 On boot you'll see `[live] VPN auto-rotation armed: locations=[...]` (or
 `not configured (no-op)`), and on each rotation

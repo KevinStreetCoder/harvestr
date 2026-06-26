@@ -1,10 +1,12 @@
 {
-  "_comment": "Mullvad VPN auto-rotation on rate-limit. COPY this file to 'vpn_config.json' (which is gitignored) and edit it. Leave rotate_locations EMPTY ([]) to disable. The mullvad CLI is auto-detected; set cli_path only to override. See VPN_SETUP.md.",
+  "_comment": "Mullvad VPN auto-rotation on rate-limit. COPY this to 'vpn_config.json' (gitignored) and edit. Leave rotate_locations EMPTY ([]) to disable. The mullvad CLI is auto-detected; set cli_path only to override. Tiered: at restart_threshold rate-limit events we RESTART the site's bots on the same IP first; only if it keeps climbing to rotate_threshold do we ROTATE the Mullvad exit. See VPN_SETUP.md.",
   "enabled": true,
   "cli_path": null,
   "rotate_locations": ["nl", "se", "de", "gb", "ch", "us"],
-  "ratelimit_threshold": 20,
+  "restart_threshold": 10,
+  "rotate_threshold": 25,
   "ratelimit_window_sec": 120,
+  "restart_cooldown_sec": 60,
   "rotate_cooldown_sec": 300,
   "connect_wait_sec": 40
 }

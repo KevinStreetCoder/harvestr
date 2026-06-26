@@ -34,14 +34,18 @@ _cfg: Optional[dict] = None
 _cli: Optional[str] = None          # "" = looked, not found; None = not looked
 _rotate_idx = 0
 _last_rotate = 0.0
+_last_restart: Dict[str, float] = {}
 _events: Dict[str, deque] = {}
 
 _DEFAULTS = {
     "enabled": True,
     "cli_path": None,                # auto-detect when null
     "rotate_locations": [],          # e.g. ["nl", "se", "de", "gb"] -- empty = disabled
-    "ratelimit_threshold": 30,       # rate-limit events within the window to trigger
+    # TIERED escalation -- don't rotate the whole VPN on every blip:
+    "restart_threshold": 10,         # RATELIMIT events in window -> RESTART (wake) the bots on the SAME IP first
+    "rotate_threshold": 25,          # RATELIMIT events in window -> the restart didn't help, ROTATE the exit IP
     "ratelimit_window_sec": 120,
+    "restart_cooldown_sec": 60,      # min seconds between bot-restarts per site
     "rotate_cooldown_sec": 300,      # min seconds between rotations
     "connect_wait_sec": 40,          # wait for "Connected" after a rotation
 }
@@ -149,7 +153,44 @@ def report_ratelimit(site: str) -> None:
             dq.popleft()
 
 
+def _count(site: str, now: float) -> int:
+    dq = _events.get(site)
+    if not dq:
+        return 0
+    win = _load_cfg()["ratelimit_window_sec"]
+    while dq and now - dq[0] > win:
+        dq.popleft()
+    return len(dq)
+
+
+def should_restart(site: str) -> bool:
+    """TIER 1: enough rate-limits to RESTART (wake) the bots on the SAME exit IP
+    -- cheap, no VPN disruption, often the rate-limit was transient. Returns
+    False once it's time to rotate (tier 2 takes precedence)."""
+    if not configured():
+        return False
+    cfg = _load_cfg()
+    now = time.monotonic()
+    with _lock:
+        if now - _last_restart.get(site, 0.0) < cfg["restart_cooldown_sec"]:
+            return False
+        n = _count(site, now)
+        # if we're already at the rotate threshold (and off cooldown), defer
+        if n >= cfg["rotate_threshold"] and now - _last_rotate >= cfg["rotate_cooldown_sec"]:
+            return False
+        return n >= cfg["restart_threshold"]
+
+
+def mark_restart(site: str) -> None:
+    """Record a tier-1 restart. Events are deliberately NOT cleared, so if the
+    restart doesn't help they keep accumulating toward the rotate threshold."""
+    with _lock:
+        _last_restart[site] = time.monotonic()
+
+
 def should_rotate(site: str) -> bool:
+    """TIER 2: the same-IP restart didn't help (events kept climbing) -- ROTATE
+    the Mullvad exit IP."""
     if not configured():
         return False
     cfg = _load_cfg()
@@ -157,13 +198,7 @@ def should_rotate(site: str) -> bool:
     with _lock:
         if now - _last_rotate < cfg["rotate_cooldown_sec"]:
             return False
-        dq = _events.get(site)
-        if not dq:
-            return False
-        win = cfg["ratelimit_window_sec"]
-        while dq and now - dq[0] > win:
-            dq.popleft()
-        return len(dq) >= cfg["ratelimit_threshold"]
+        return _count(site, now) >= cfg["rotate_threshold"]
 
 
 def rotate(reason: str = "", log: Optional[Callable[[str], None]] = None) -> Optional[str]:

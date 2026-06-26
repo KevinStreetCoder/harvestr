@@ -4879,27 +4879,51 @@ def api_live_sites():
 # a ~1.5 s TTL dedupes bursts with negligible staleness for a dashboard.
 _live_snap_cache = {"ts": 0.0, "data": None}
 _live_snap_lock = threading.Lock()
+_live_last_request = {"ts": 0.0}
+_live_snap_builder_started = False
+
+
+def _live_snapshot_builder_loop():
+    """Rebuild the heavy full snapshot OFF the request path. At 1000+ models
+    get_snapshot() is GIL-heavy (competing with every bot thread) and a single
+    build can exceed an HTTP timeout, so /api/live/status must never build
+    inline. This daemon rebuilds on a loop -- only while the dashboard is being
+    polled -- and the endpoint returns the most recent pre-built copy instantly
+    (stale by at most one build cycle, which is fine for a dashboard)."""
+    import time as _t
+    while True:
+        if _t.monotonic() - _live_last_request["ts"] < 30.0:
+            try:
+                data = _live.get_snapshot()
+                with _live_snap_lock:
+                    _live_snap_cache["data"] = data
+                    _live_snap_cache["ts"] = _t.monotonic()
+            except Exception:
+                pass
+        _t.sleep(2.0)
+
+
+def _ensure_snap_builder():
+    global _live_snap_builder_started
+    if _live_snap_builder_started or not _live:
+        return
+    _live_snap_builder_started = True
+    threading.Thread(target=_live_snapshot_builder_loop,
+                     name="live-snapshot-builder", daemon=True).start()
 
 
 def _live_snapshot_cached():
     import time as _t
-    now = _t.monotonic()
-    data = _live_snap_cache["data"]
-    if data is not None and (now - _live_snap_cache["ts"]) < 1.5:
-        return data
-    # Serialize concurrent misses (double-checked): with several browser tabs /
-    # the 3s+12s poll split, a burst of requests would otherwise EACH rebuild the
-    # heavy 1000+ model snapshot at once. First thread computes; the rest wait
-    # here and return the fresh result.
+    _live_last_request["ts"] = _t.monotonic()
+    _ensure_snap_builder()
     with _live_snap_lock:
-        now = _t.monotonic()
         data = _live_snap_cache["data"]
-        if data is not None and (now - _live_snap_cache["ts"]) < 1.5:
-            return data
-        data = _live.get_snapshot()
-        _live_snap_cache["data"] = data
-        _live_snap_cache["ts"] = now
+    if data is not None:
         return data
+    # First poll before the builder produced a snapshot: return a placeholder
+    # instantly (the builder fills it within a cycle) rather than blocking the
+    # request on a full 1000+ model build.
+    return {"available": True, "models": [], "summary": {}, "building": True}
 
 
 @app.route("/api/live/status")

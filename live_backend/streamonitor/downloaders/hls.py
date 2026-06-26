@@ -23,6 +23,23 @@ from parameters import DEBUG, CONTAINER, FFMPEG_PATH
 from streamonitor.bot import Bot
 import requests
 
+# Optional VPN-rotation ride-through (see vpn_rotator.in_grace): during a Mullvad
+# rotation the tunnel is briefly down, so the playlist writer + ffmpeg watchdog
+# skip their aborts and let the SAME capture resume on the new IP instead of
+# tearing it down into a fresh file. Safe no-op when rotation isn't active.
+try:
+    from streamonitor.utils import vpn_rotator as _vpnrot
+except Exception:
+    _vpnrot = None
+
+
+def _in_vpn_grace() -> bool:
+    try:
+        return bool(_vpnrot and _vpnrot.in_grace())
+    except Exception:
+        return False
+
+
 TEMP_DIR_NAME = "M3U8_TMP"
 
 try:
@@ -199,8 +216,8 @@ class _RollingM3UWriter:
                     
                     if self.logger and consecutive_errors <= 3:
                         self.logger.warning(f"Playlist fetch returned {r.status_code}")
-                    
-                    if consecutive_errors >= max_errors:
+
+                    if consecutive_errors >= max_errors and not _in_vpn_grace():
                         self._error = f"Too many failed fetches ({consecutive_errors})"
                         break
                     
@@ -257,8 +274,8 @@ class _RollingM3UWriter:
                 consecutive_errors += 1
                 if self.logger and consecutive_errors <= 3:
                     self.logger.warning(f"Playlist fetch error: {e}")
-                
-                if consecutive_errors >= max_errors:
+
+                if consecutive_errors >= max_errors and not _in_vpn_grace():
                     self._error = f"Network errors: {e}"
                     break
             
@@ -625,6 +642,11 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
         last_sz = 0
         last_growth = start
         while not _wd_stop.wait(5):
+            # Ride through a VPN rotation: the tunnel is briefly down, so don't
+            # count the gap as no-data/stall. ffmpeg's seg_max_retry resumes the
+            # SAME .tmp.ts on the new IP; the next post-grace poll sees it grow.
+            if _in_vpn_grace():
+                continue
             try:
                 sz = os.path.getsize(out_path) if os.path.exists(out_path) else 0
             except Exception:

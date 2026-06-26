@@ -15,6 +15,24 @@ import requests.cookies
 from parameters import DEBUG, SEGMENT_TIME, CONTAINER, FFMPEG_PATH, FFMPEG_READRATE
 from .ffsettings import FFSettings
 
+# Optional VPN-rotation ride-through. When the Mullvad exit is mid-rotation the
+# tunnel is briefly down, so every Mullvad-routed recording sees a gap. We skip
+# the Python stall/no-data aborts during that window and let ffmpeg's own
+# -reconnect resume the SAME file on the new IP, rather than killing it and
+# starting a new file. Safe no-op when rotation isn't configured/active.
+try:
+    from streamonitor.utils import vpn_rotator as _vpnrot
+except Exception:
+    _vpnrot = None
+
+
+def _in_vpn_grace() -> bool:
+    try:
+        return bool(_vpnrot and _vpnrot.in_grace())
+    except Exception:
+        return False
+
+
 if TYPE_CHECKING:
     from streamonitor.bot import Bot
 
@@ -402,20 +420,21 @@ def getVideoFfmpeg(self: 'Bot', url: str, filename: str) -> bool:
                     else:
                         low_speed_start = None
                 
-                # Check for single large lag
+                # Check for single large lag (skip during a VPN rotation: a big
+                # catch-up lag right after the tunnel returns is expected, not a stall)
                 m = lag_pattern.search(s)
-                if m and (now - attempt_start) > FFSettings.STARTUP_GRACE_SEC:
+                if m and (now - attempt_start) > FFSettings.STARTUP_GRACE_SEC and not _in_vpn_grace():
                     lag_s = float(m.group(1))
                     if lag_s >= FFSettings.MAX_SINGLE_LAG_SEC:
                         stalled = True
                         stall_reason = f"lag {lag_s:.2f}s"
                         break
-                
+
                 # Check for consecutive skip messages
                 if skip_pattern.search(s):
                     consecutive_skips += 1
                     if consecutive_skips >= FFSettings.MAX_CONSEC_SKIP_LINES and \
-                       (now - attempt_start) > FFSettings.STARTUP_GRACE_SEC:
+                       (now - attempt_start) > FFSettings.STARTUP_GRACE_SEC and not _in_vpn_grace():
                         stalled = True
                         stall_reason = f"skip lines {consecutive_skips}"
                         break
@@ -461,6 +480,13 @@ def getVideoFfmpeg(self: 'Bot', url: str, filename: str) -> bool:
             
             # Skip checks during startup grace period
             if (now - attempt_start) < FFSettings.STARTUP_GRACE_SEC:
+                continue
+
+            # Ride through a VPN rotation: the Mullvad tunnel is briefly down, so
+            # skip every stall/no-data abort below. ffmpeg's -reconnect keeps
+            # retrying and resumes the SAME file on the new IP; without this the
+            # frozen-PTS (20s) check would kill it mid-gap and split the file.
+            if _in_vpn_grace():
                 continue
 
             # No-data abort: a ghost stream (model "online" but serving no real

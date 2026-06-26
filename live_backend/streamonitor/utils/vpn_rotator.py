@@ -35,6 +35,7 @@ _cli: Optional[str] = None          # "" = looked, not found; None = not looked
 _rotate_idx = 0
 _last_rotate = 0.0
 _last_restart: Dict[str, float] = {}
+_grace_until = 0.0          # monotonic deadline; downloaders ride through the gap while now < this
 _events: Dict[str, deque] = {}
 
 _DEFAULTS = {
@@ -149,6 +150,25 @@ def status_text() -> str:
     return (r.stdout or "").strip() if r else ""
 
 
+def in_grace() -> bool:
+    """True while a rotation is dropping / re-establishing the Mullvad tunnel
+    (plus a short settle). EVERY Mullvad-routed recording sees a network gap
+    then. Downloaders check this to RIDE THROUGH the gap -- they skip their
+    stall / no-data aborts so ffmpeg's own -reconnect + seg_max_retry resume the
+    SAME file on the new IP, instead of the Python watchdog killing ffmpeg and
+    the bot loop starting a brand-new file. Cheap (one monotonic compare) and a
+    safe no-op when no rotation is happening."""
+    return time.monotonic() < _grace_until
+
+
+def _arm_grace(seconds: float) -> None:
+    """Extend the ride-through window to at least `seconds` from now."""
+    global _grace_until
+    g = time.monotonic() + float(seconds)
+    if g > _grace_until:
+        _grace_until = g
+
+
 def report_ratelimit(site: str) -> None:
     """A bot calls this when its status poll is rate-limited (RATELIMIT/429/403).
     Cheap no-op unless rotation is configured."""
@@ -219,6 +239,11 @@ def rotate(reason: str = "", log: Optional[Callable[[str], None]] = None) -> Opt
         return None
     cfg = _load_cfg()
     locs = cfg["rotate_locations"]
+    # Arm the ride-through grace BEFORE we drop the tunnel, so every in-flight
+    # recording tolerates the whole disconnect->reconnect gap (cover the connect
+    # wait + a settle buffer). Without this, the per-downloader stall watchdogs
+    # kill ffmpeg mid-gap and the bot starts a new file.
+    _arm_grace(int(cfg.get("connect_wait_sec", 40)) + 30)
     with _lock:
         loc = locs[_rotate_idx % len(locs)]
         _rotate_idx += 1
@@ -235,6 +260,9 @@ def rotate(reason: str = "", log: Optional[Callable[[str], None]] = None) -> Opt
             new_ok = True
             break
         time.sleep(2)
+    # Extend the grace a little past "Connected" so routing/DNS settle and
+    # ffmpeg has reconnected before the stall detectors re-arm.
+    _arm_grace(25)
     if log:
         try:
             log(f"[vpn] rotated Mullvad exit -> '{loc}' "

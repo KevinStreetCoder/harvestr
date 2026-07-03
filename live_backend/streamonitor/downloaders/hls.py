@@ -144,8 +144,15 @@ class _RollingM3UWriter:
     Thread-safe with proper error handling.
     """
     
-    def __init__(self, media_url: str, sess: requests.Session, headers: Dict[str, str], m3u_processor: Optional[Callable[[str], str]], tmp_root: str, model_key: str, poll_sec: float = 1.5, logger: Any = None, bot_instance: Any = None):
+    def __init__(self, media_url: str, sess: requests.Session, headers: Dict[str, str], m3u_processor: Optional[Callable[[str], str]], tmp_root: str, model_key: str, poll_sec: float = 1.5, logger: Any = None, bot_instance: Any = None, reauth_cb: Optional[Callable[[], Optional[str]]] = None):
         self.media_url = media_url
+        # Called (no args) to fetch a FRESH media-playlist URL (new CDN token) when
+        # the current one 403s -- lets the recording continue IN-PLACE across the
+        # cam CDN's periodic token rotation instead of finalizing the .tmp.ts and
+        # starting a new fragment.
+        self.reauth_cb = reauth_cb
+        self._reauth_used = 0
+        self._reauth_since_success = 0
         self.sess = sess
         self.headers = dict(headers or {})
         self.m3u_processor = m3u_processor
@@ -197,24 +204,35 @@ class _RollingM3UWriter:
                 if r.status_code != 200:
                     consecutive_errors += 1
                     
-                    # Special handling for 403 - likely private show
+                    # 403 usually means the playlist TOKEN expired (cam CDNs rotate
+                    # it every few minutes), NOT that the show went private. Re-fetch
+                    # a fresh token and keep polling the SAME rolling.m3u8 so ffmpeg
+                    # records straight through the rotation -> fewer, longer files.
+                    # Bounded: if the fresh token ALSO 403s (or no URL) a few times
+                    # in a row, the show really is private/offline -> stop.
                     if r.status_code == 403:
-                        if self.logger:
-                            self.logger.debug("Playlist access forbidden (403) - likely private show")
-                        
-                        # Trigger status recheck if bot instance is available
-                        if self.bot_instance and hasattr(self.bot_instance, 'getStatus'):
+                        if self.reauth_cb is not None and self._reauth_since_success < 3:
+                            fresh = None
                             try:
-                                if self.logger:
-                                    self.logger.info("Checking status due to forbidden playlist")
-                                current_status = self.bot_instance.getStatus()
-                                if self.logger:
-                                    self.logger.info(f"Current status: {current_status}")
+                                fresh = self.reauth_cb()
                             except Exception as e:
                                 if self.logger:
-                                    self.logger.warning(f"Failed to check status: {e}")
-                        
-                        # Stop trying immediately for 403 - no point retrying
+                                    self.logger.debug(f"token reauth error: {e}")
+                            if fresh:
+                                self.media_url = fresh
+                                self._reauth_used += 1
+                                self._reauth_since_success += 1  # cleared on next 200
+                                if self.logger:
+                                    self.logger.debug(f"playlist token refreshed in-place (#{self._reauth_used})")
+                                continue  # poll the fresh URL right away
+                        # No fresh token -> genuinely private/offline. Confirm + stop.
+                        if self.logger:
+                            self.logger.debug("Playlist 403 and no fresh token - stopping")
+                        if self.bot_instance and hasattr(self.bot_instance, 'getStatus'):
+                            try:
+                                self.bot_instance.getStatus()
+                            except Exception:
+                                pass
                         self._error = "Playlist access forbidden (likely private show)"
                         break
                     
@@ -230,7 +248,8 @@ class _RollingM3UWriter:
                 
                 # Reset error counter on success
                 consecutive_errors = 0
-                
+                self._reauth_since_success = 0  # a good fetch clears the reauth budget
+
                 txt = r.content.decode("utf-8", errors="ignore")
                 
                 # Apply custom processor
@@ -444,12 +463,38 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
     if callable(m3u_processor):
         text1 = m3u_processor(text1)
 
+    def _resolve_media_url():
+        """Re-fetch a fresh stream URL from the bot and resolve it to the media
+        playlist URL (same steps as the initial resolution above). Lets the writer
+        refresh an expired CDN token WITHOUT ending the recording. Returns the
+        media URL, or None if the model is no longer public (-> writer stops)."""
+        try:
+            fresh = self.getVideoUrl()
+        except Exception:
+            fresh = None
+        if not fresh:
+            return None
+        t, _c = fetch_text(fresh)
+        if t is None:
+            return None
+        if callable(m3u_processor):
+            t = m3u_processor(t)
+        try:
+            p = m3u8.loads(t)
+        except Exception:
+            p = None
+        if getattr(p, "is_variant", False) and getattr(p, "playlists", []):
+            b = max(p.playlists, key=lambda x: (getattr(x.stream_info, "bandwidth", 0) or 0))
+            return b.uri if b.uri.startswith(("http://", "https://")) else urljoin(fresh, b.uri)
+        return fresh
+
     # Start writer
     tmp_root = _get_tmp_root(self)
     model_key = f"[{getattr(self, 'siteslug', 'SITE')}]{self.username}"
     writer = _RollingM3UWriter(
         media_url=url, sess=sess, headers=headers, m3u_processor=m3u_processor,
-        tmp_root=tmp_root, model_key=model_key, poll_sec=1.5, logger=self.logger, bot_instance=self
+        tmp_root=tmp_root, model_key=model_key, poll_sec=1.5, logger=self.logger,
+        bot_instance=self, reauth_cb=_resolve_media_url
     )
     writer.start()
     writer_ref["w"] = writer

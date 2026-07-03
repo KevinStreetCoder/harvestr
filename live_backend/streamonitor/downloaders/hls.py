@@ -513,11 +513,24 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
                     break
         return v, a
 
-    # Select best video variant + detect a SEPARATE audio rendition
+    # Select best video variant + detect a SEPARATE audio rendition.
+    #
+    # OPT-IN (STRMNTR_CB_AUDIO=1), DEFAULT OFF. Feeding ffmpeg the local master
+    # with a separate audio group stalled ffmpeg's A/V interleave in production
+    # (with -max_interleave_delta 0 it waits INDEFINITELY for audio packets to
+    # interleave and emits nothing) -> the 30s no-data watchdog aborted EVERY CB
+    # capture -> empty files + a hard retry loop across all models. So by default
+    # we keep the proven video-only path (url = best video variant, single
+    # playlist). Re-enable only after verifying the mux holds on a FRESH CB
+    # capture (ffprobe must show streams=video,audio). The playlists themselves
+    # are well-formed; the open problem is purely ffmpeg's local-master + separate
+    # audio-group muxing, so the dual-playlist machinery below stays intact.
+    _audio_enabled = os.environ.get("STRMNTR_CB_AUDIO") == "1"
     audio_url = None
     if getattr(pl0, "is_variant", False):
-        url, audio_url = _pick_video_audio(pl0, url)
-        if audio_url:
+        url, _aud = _pick_video_audio(pl0, url)
+        if _aud and _audio_enabled:
+            audio_url = _aud
             self.logger.debug("separate audio rendition -> dual-playlist capture (audio+video)")
 
     # Fetch media playlist
@@ -555,7 +568,10 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
         except Exception:
             p = None
         if getattr(p, "is_variant", False):
-            return _pick_video_audio(p, fresh)   # (video_url, audio_url)
+            v, a = _pick_video_audio(p, fresh)
+            # Only refresh audio when audio muxing is enabled; otherwise return the
+            # bare video URL so the writer never flips into dual-playlist on re-auth.
+            return (v, a) if _audio_enabled else v
         return fresh
 
     # Start writer (dual-playlist when a separate audio rendition exists)

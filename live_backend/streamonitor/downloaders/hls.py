@@ -761,7 +761,15 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
                     # benign edge churn -- log at DEBUG, not ERROR, so they stop
                     # reading as a flood of [CB]/[SC] errors. Genuine non-retry
                     # failures still surface at ERROR.
-                    if "retry" in low or "keepalive" in low or "reconnect" in low:
+                    if any(k in low for k in ("retry", "keepalive", "reconnect",
+                                              "connection to", "connection reset",
+                                              "timed out", "timeout", "broken pipe",
+                                              "end of file")):
+                        # Transient CDN drops ffmpeg recovers from via -reconnect
+                        # (e.g. "Connection to tcp://edgeNN-rtm... failed"); the
+                        # recording keeps going (seen: 144 MB captured right after
+                        # one). Real persistent failures still surface via the
+                        # stall watchdog + the run-loop 3-strike, so this is debug.
                         self.logger.debug(f"[ffmpeg] transient: {line}")
                     else:
                         self.logger.error(f"FFmpeg error: {line}")

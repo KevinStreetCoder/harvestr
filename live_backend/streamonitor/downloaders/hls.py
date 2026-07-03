@@ -144,8 +144,12 @@ class _RollingM3UWriter:
     Thread-safe with proper error handling.
     """
     
-    def __init__(self, media_url: str, sess: requests.Session, headers: Dict[str, str], m3u_processor: Optional[Callable[[str], str]], tmp_root: str, model_key: str, poll_sec: float = 1.5, logger: Any = None, bot_instance: Any = None, reauth_cb: Optional[Callable[[], Optional[str]]] = None):
+    def __init__(self, media_url: str, sess: requests.Session, headers: Dict[str, str], m3u_processor: Optional[Callable[[str], str]], tmp_root: str, model_key: str, poll_sec: float = 1.5, logger: Any = None, bot_instance: Any = None, reauth_cb: Optional[Callable[[], Optional[str]]] = None, audio_url: Optional[str] = None):
         self.media_url = media_url
+        # Separate audio-rendition media playlist (CB cmaf). When set, the writer
+        # also mirrors it to rolling_audio.m3u8 and ffmpeg reads a local master
+        # that muxes both -> audio is captured. None = audio muxed (SC), single file.
+        self.audio_url = audio_url
         # Called (no args) to fetch a FRESH media-playlist URL (new CDN token) when
         # the current one 403s -- lets the recording continue IN-PLACE across the
         # cam CDN's periodic token rotation instead of finalizing the .tmp.ts and
@@ -180,6 +184,40 @@ class _RollingM3UWriter:
                     pass
 
         self.path = os.path.join(self.model_dir, "rolling.m3u8")
+        self.audio_path = os.path.join(self.model_dir, "rolling_audio.m3u8")
+        self.master_path = os.path.join(self.model_dir, "master.m3u8")
+        if self.audio_url:
+            # Static local master muxing the two local rolling playlists. ffmpeg
+            # reads this; each rolling file carries absolute (remote) segment URLs
+            # that fetch direct (not fingerprint-blocked).
+            try:
+                with open(self.master_path, "w", encoding="utf-8") as f:
+                    f.write('#EXTM3U\n#EXT-X-VERSION:6\n'
+                            '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="a",DEFAULT=YES,AUTOSELECT=YES,URI="rolling_audio.m3u8"\n'
+                            '#EXT-X-STREAM-INF:BANDWIDTH=5000000,AUDIO="aud"\n'
+                            'rolling.m3u8\n')
+            except Exception:
+                pass
+
+    def _mirror_audio(self):
+        """Fetch the audio media playlist and mirror it to rolling_audio.m3u8.
+        Best-effort: a miss just means a brief audio gap; ffmpeg tolerates it."""
+        if not self.audio_url:
+            return
+        try:
+            r = self.sess.get(self.audio_url, headers=self.headers, timeout=10)
+            if r.status_code != 200:
+                return
+            txt = r.content.decode("utf-8", errors="ignore")
+            if callable(self.m3u_processor):
+                txt = self.m3u_processor(txt)
+            if "#EXTM3U" not in txt:
+                return
+            fixed = _rewrite_playlist_abs_and_tokens(self.audio_url, txt)
+            with open(self.audio_path, "w", encoding="utf-8") as f:
+                f.write(fixed)
+        except Exception:
+            pass
 
     def start(self):
         self._thr = threading.Thread(target=self._loop, daemon=True)
@@ -219,7 +257,12 @@ class _RollingM3UWriter:
                                 if self.logger:
                                     self.logger.debug(f"token reauth error: {e}")
                             if fresh:
-                                self.media_url = fresh
+                                if isinstance(fresh, (tuple, list)):
+                                    self.media_url = fresh[0]
+                                    if len(fresh) > 1 and fresh[1]:
+                                        self.audio_url = fresh[1]   # refresh audio token too
+                                else:
+                                    self.media_url = fresh
                                 self._reauth_used += 1
                                 self._reauth_since_success += 1  # cleared on next 200
                                 if self.logger:
@@ -249,6 +292,7 @@ class _RollingM3UWriter:
                 # Reset error counter on success
                 consecutive_errors = 0
                 self._reauth_since_success = 0  # a good fetch clears the reauth budget
+                self._mirror_audio()             # keep rolling_audio.m3u8 fresh (no-op if muxed)
 
                 txt = r.content.decode("utf-8", errors="ignore")
                 
@@ -445,10 +489,29 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
     except Exception:
         pl0 = None
 
-    # Select best variant
-    if getattr(pl0, "is_variant", False) and getattr(pl0, "playlists", []):
-        best = max(pl0.playlists, key=lambda p: (getattr(p.stream_info, "bandwidth", 0) or 0))
-        url = best.uri if best.uri.startswith(("http://", "https://")) else urljoin(url, best.uri)
+    def _pick_video_audio(pl, base):
+        """From a parsed master, return (video_media_url, audio_media_url). audio is
+        None when muxed (no separate EXT-X-MEDIA:TYPE=AUDIO). CB's cmaf/LL-HLS splits
+        them, so without this we'd capture video-only -> silent recordings."""
+        v, a = base, None
+        pls = getattr(pl, "playlists", []) or []
+        if getattr(pl, "is_variant", False) and pls:
+            best = max(pls, key=lambda p: (getattr(p.stream_info, "bandwidth", 0) or 0))
+            v = best.uri if best.uri.startswith(("http://", "https://")) else urljoin(base, best.uri)
+            grp = getattr(best.stream_info, "audio", None)
+            for m in (getattr(pl, "media", []) or []):
+                if getattr(m, "type", "") == "AUDIO" and getattr(m, "uri", None) and \
+                        (grp is None or getattr(m, "group_id", None) == grp):
+                    a = m.uri if m.uri.startswith(("http://", "https://")) else urljoin(base, m.uri)
+                    break
+        return v, a
+
+    # Select best video variant + detect a SEPARATE audio rendition
+    audio_url = None
+    if getattr(pl0, "is_variant", False):
+        url, audio_url = _pick_video_audio(pl0, url)
+        if audio_url:
+            self.logger.debug("separate audio rendition -> dual-playlist capture (audio+video)")
 
     # Fetch media playlist
     text1, code1 = fetch_text(url)
@@ -484,18 +547,17 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
             p = m3u8.loads(t)
         except Exception:
             p = None
-        if getattr(p, "is_variant", False) and getattr(p, "playlists", []):
-            b = max(p.playlists, key=lambda x: (getattr(x.stream_info, "bandwidth", 0) or 0))
-            return b.uri if b.uri.startswith(("http://", "https://")) else urljoin(fresh, b.uri)
+        if getattr(p, "is_variant", False):
+            return _pick_video_audio(p, fresh)   # (video_url, audio_url)
         return fresh
 
-    # Start writer
+    # Start writer (dual-playlist when a separate audio rendition exists)
     tmp_root = _get_tmp_root(self)
     model_key = f"[{getattr(self, 'siteslug', 'SITE')}]{self.username}"
     writer = _RollingM3UWriter(
         media_url=url, sess=sess, headers=headers, m3u_processor=m3u_processor,
         tmp_root=tmp_root, model_key=model_key, poll_sec=1.5, logger=self.logger,
-        bot_instance=self, reauth_cb=_resolve_media_url
+        bot_instance=self, reauth_cb=_resolve_media_url, audio_url=audio_url
     )
     writer.start()
     writer_ref["w"] = writer
@@ -513,8 +575,10 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
             pass
         return False
 
-    # Start FFmpeg with local playlist - WRITE TO .tmp.ts (NO RENAME - for post-processing)
-    ok = _ffmpeg_dump_to_ts(self, writer.path, headers, output_path, ffmpeg_proc_ref, local_m3u=True)
+    # Feed ffmpeg the LOCAL master (video+audio) when we captured a separate audio
+    # rendition, else the single video rolling playlist. Segments fetch direct.
+    ff_input = writer.master_path if (audio_url and os.path.exists(writer.master_path)) else writer.path
+    ok = _ffmpeg_dump_to_ts(self, ff_input, headers, output_path, ffmpeg_proc_ref, local_m3u=True)
 
     # Cleanup
     try:

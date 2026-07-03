@@ -753,7 +753,7 @@ INDEX_HTML = r"""
   .perf-row .count { margin-left: auto; color: var(--text-3); font-size: 11.5px; }
   .perf-list { max-height: clamp(200px, 50vh, 420px); overflow-y: auto; padding-right: 4px; }
 
-  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 18px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
   @media (max-width: 768px) { .stats { grid-template-columns: repeat(2, 1fr); } }
   @media (max-width: 480px) { .stats { grid-template-columns: 1fr; } }
   .stat-box {
@@ -1940,6 +1940,7 @@ INDEX_HTML = r"""
       <div class="stat-box"><div class="value" id="live-stat-total">–</div><div class="label">Models tracked</div></div>
       <div class="stat-box accent"><div class="value" id="live-stat-running">–</div><div class="label">Polling</div></div>
       <div class="stat-box good"><div class="value" id="live-stat-recording">–</div><div class="label">Recording now</div></div>
+      <div class="stat-box accent"><div class="value" id="live-stat-speed">–</div><div class="label">Download speed</div></div>
       <div class="stat-box warn"><div class="value" id="live-stat-size">–</div><div class="label">Recorded size</div></div>
       <div class="stat-box" id="live-stat-disk-box"><div class="value" id="live-stat-disk">–</div><div class="label">Free on disk</div></div>
     </div>
@@ -3420,6 +3421,8 @@ function _liveApplyStats(s) {
   document.getElementById('live-stat-running').textContent = s.running ?? 0;
   document.getElementById('live-stat-recording').textContent = s.recording ?? 0;
   document.getElementById('live-stat-size').textContent = bytesHuman(s.total_bytes || 0);
+  { const sp = document.getElementById('live-stat-speed');
+    if (sp) sp.textContent = (s.download_bps && s.download_bps > 0) ? (bytesHuman(s.download_bps) + '/s') : '0 B/s'; }
   // Free disk on the recordings drive, color-coded by how full it is.
   try {
     const box = document.getElementById('live-stat-disk-box');

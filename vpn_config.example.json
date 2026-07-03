@@ -1,8 +1,8 @@
 {
-  "_comment": "Mullvad VPN auto-rotation on rate-limit. COPY this to 'vpn_config.json' (gitignored) and edit. Leave rotate_locations EMPTY ([]) to disable. The mullvad CLI is auto-detected; set cli_path only to override. Tiered: at restart_threshold rate-limit events we RESTART the site's bots on the same IP first; only if it keeps climbing to rotate_threshold do we ROTATE the Mullvad exit. See VPN_SETUP.md.",
+  "_comment": "Mullvad VPN auto-rotation on rate-limit. COPY this to 'vpn_config.json' (gitignored) and edit. Leave rotate_locations EMPTY ([]) to disable. The mullvad CLI is auto-detected; set cli_path only to override. Tiered: at restart_threshold rate-limit events we RESTART the site's bots on the same IP first; only if it keeps climbing to rotate_threshold do we ROTATE the Mullvad exit. rotate_locations: prefer FAST Mullvad hub countries WITHOUT adult-content age-verification/geo-blocks -- nl/se/ch + Nordics are good; AVOID gb (UK Online Safety Act age wall), fr, and us (several states age-gate) or the cam site shows a verification wall. See VPN_SETUP.md.",
   "enabled": true,
   "cli_path": null,
-  "rotate_locations": ["nl", "se", "de", "gb", "ch", "us"],
+  "rotate_locations": ["nl", "se", "ch", "no", "dk", "fi"],
   "restart_threshold": 10,
   "rotate_threshold": 25,
   "ratelimit_window_sec": 120,

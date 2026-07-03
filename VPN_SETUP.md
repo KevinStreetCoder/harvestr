@@ -41,7 +41,7 @@ cp vpn_config.example.json vpn_config.json
 {
   "enabled": true,
   "cli_path": null,                         // null = auto-detect; or "C:\\...\\mullvad.exe"
-  "rotate_locations": ["nl","se","de","gb","ch","us"],  // mullvad codes; EMPTY = disabled
+  "rotate_locations": ["nl","se","ch","no","dk","fi"],  // mullvad codes; EMPTY = disabled
   "restart_threshold": 10,                  // TIER 1: events -> restart bots on the SAME IP
   "rotate_threshold": 25,                   // TIER 2: events -> rotate the Mullvad exit IP
   "ratelimit_window_sec": 120,
@@ -52,6 +52,12 @@ cp vpn_config.example.json vpn_config.json
 ```
 - `rotate_locations` are Mullvad codes from `mullvad relay list` — a country
   (`nl`), or country + city (`"us nyc"`). The rotator cycles through them.
+- **Pick FAST hub countries WITHOUT adult-content age-verification / geo-blocks.**
+  Good: `nl` `se` `ch` and the Nordics (`no` `dk` `fi`) — high-capacity Mullvad
+  relays, and the cam sites load without a verification wall. **Avoid** `gb`
+  (UK Online Safety Act age check), `fr`, and `us` (several states age-gate) —
+  a flagged exit there makes the site show an age wall instead of the stream.
+  Mullvad auto-picks a fast relay within each country.
 - Leave `rotate_locations` empty (or `enabled: false`) to turn rotation OFF.
 - Override locations without editing the file via env:
   `STRMNTR_VPN_ROTATE="nl,se,de"`.

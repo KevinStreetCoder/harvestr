@@ -219,6 +219,10 @@ class Bot(Thread):
         # card to ERROR or log at ERROR for them; we only escalate after several
         # in a row (a genuinely stuck-online model). Reset on any successful record.
         self._consec_dl_fail: int = 0
+        # Path of the file the active recording is currently writing to (set by the
+        # downloader). Lets the LiveManager measure real-time write speed by
+        # os.path.getsize on it, since video_files_total_size is only cache-updated.
+        self._current_output: Optional[str] = None
         self.video_files: List[VideoData] = []
         self.video_files_total_size: int = 0
         # Guards the (list, size) rebind in cache_file_list so concurrent

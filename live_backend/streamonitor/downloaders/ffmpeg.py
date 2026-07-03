@@ -384,6 +384,7 @@ def getVideoFfmpeg(self: 'Bot', url: str, filename: str) -> bool:
         out_path = None
         if SEGMENT_TIME is None:
             out_path = os.path.splitext(filename)[0] + EXT_SINGLE
+            self._current_output = out_path  # for live write-speed measurement
         
         ring = collections.deque(maxlen=FFSettings.DEBUG_TAIL_LINES)
         

@@ -384,6 +384,7 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
     # CRITICAL: Always write to .tmp.ts - NO RENAME, leave for post-processing
     base_name = os.path.splitext(filename)[0]
     output_path = base_name + '.tmp.ts'
+    self._current_output = output_path  # for live write-speed measurement
     out_dir = os.path.dirname(output_path)
     os.makedirs(out_dir, exist_ok=True)
 

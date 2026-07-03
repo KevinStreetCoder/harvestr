@@ -1010,6 +1010,7 @@ class LiveManager:
         recording_count = 0
         total_sessions_bytes = 0
         status_hist: Dict[str, int] = {}
+        _active_files: List[str] = []  # live recording output paths, for write-speed
 
         # Lazy-init the history tracker (file-backed)
         if getattr(self, "_history", None) is None:
@@ -1038,6 +1039,9 @@ class LiveManager:
             is_recording = bool(getattr(bot, "recording", False))
             if is_recording:
                 recording_count += 1
+                _out = getattr(bot, "_current_output", None)
+                if _out:
+                    _active_files.append(_out)
             # Total file size for this model (StreaMonitor caches in
             # video_files_total_size on the Bot)
             size_bytes = int(getattr(bot, "video_files_total_size", 0) or 0)
@@ -1102,10 +1106,37 @@ class LiveManager:
                 "recording": recording_count,
                 "total_bytes": total_sessions_bytes,
                 "status_hist": status_hist,
+                "download_bps": self._download_speed(_active_files),
                 **self._disk_summary(),
             },
             "models": models,
         }
+
+    def _download_speed(self, active_files: List[str]) -> float:
+        """Aggregate LIVE write rate (bytes/sec) across the currently-recording
+        output files, via real os.path.getsize (video_files_total_size is only
+        cache-updated so it can't show live speed). Tracks per-file growth so a
+        file entering/leaving the active set doesn't spike it. Cached on
+        self._download_bps so the cheap live_summary can serve it too."""
+        import os as _os, time as _t
+        now = _t.monotonic()
+        prev = getattr(self, "_speed_prev", None) or {}
+        prev_t = getattr(self, "_speed_prev_time", None)
+        cur: Dict[str, int] = {}
+        grown = 0
+        for p in active_files:
+            try:
+                sz = _os.path.getsize(p)
+            except Exception:
+                continue
+            cur[p] = sz
+            if p in prev and sz > prev[p]:
+                grown += sz - prev[p]
+        self._speed_prev = cur
+        self._speed_prev_time = now
+        bps = (grown / (now - prev_t)) if (prev_t and now > prev_t) else 0.0
+        self._download_bps = bps
+        return bps
 
     def _disk_summary(self) -> Dict[str, Any]:
         """Free/total bytes on the recordings drive — for the UI disk gauge."""
@@ -1153,6 +1184,7 @@ class LiveManager:
         out: Dict[str, Any] = {
             "total": len(bots), "running": running, "recording": recording,
             "total_bytes": total_bytes, "status_hist": status_hist,
+            "download_bps": getattr(self, "_download_bps", 0.0),  # live write speed (get_snapshot computes it)
         }
         out.update(self._disk_summary())
         cache["data"] = out

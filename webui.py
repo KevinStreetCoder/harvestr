@@ -775,6 +775,20 @@ INDEX_HTML = r"""
   .stat-box.warn::before { background: var(--warn); }
   .stat-box.warn .value { color: var(--warn); }
 
+  /* RAG health light */
+  .health-pill { display: inline-flex; align-items: center; gap: 9px; padding: 7px 14px;
+                 border-radius: 20px; font-size: 13px; font-weight: 600; margin-bottom: 14px;
+                 border: 1px solid var(--border); max-width: 100%; }
+  .health-pill .hp-dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
+  .health-pill .hp-uptime { color: var(--text-3); font-weight: 400; font-size: 11.5px; margin-left: 4px; }
+  .health-pill.green { color: var(--good); background: #0e1f15; }
+  .health-pill.green .hp-dot { background: var(--good); box-shadow: 0 0 8px var(--good); }
+  .health-pill.amber { color: var(--warn); background: #241d0a; }
+  .health-pill.amber .hp-dot { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+  .health-pill.red   { color: var(--bad);  background: #2a1013; }
+  .health-pill.red .hp-dot { background: var(--bad); box-shadow: 0 0 8px var(--bad); animation: hp-pulse 1.2s infinite; }
+  @keyframes hp-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
   /* Site picker */
   .site-tabs { display: flex; gap: 2px; background: var(--bg); padding: 3px;
                border-radius: 8px; border: 1px solid var(--border); margin-bottom: 12px; }
@@ -1935,6 +1949,11 @@ INDEX_HTML = r"""
   </div>
 
   <div id="live-available">
+    <!-- RAG health light -->
+    <div id="live-health" class="health-pill green" data-tip="Overall recorder health (disk, data flow, coverage, errors)">
+      <span class="hp-dot"></span><span id="live-health-text">System healthy</span>
+      <span id="live-uptime" class="hp-uptime"></span>
+    </div>
     <!-- Live stats strip -->
     <div class="stats">
       <div class="stat-box"><div class="value" id="live-stat-total">–</div><div class="label">Models tracked</div></div>
@@ -1942,7 +1961,8 @@ INDEX_HTML = r"""
       <div class="stat-box good"><div class="value" id="live-stat-recording">–</div><div class="label">Recording now</div></div>
       <div class="stat-box accent"><div class="value" id="live-stat-speed">–</div><div class="label">Download speed</div></div>
       <div class="stat-box warn"><div class="value" id="live-stat-size">–</div><div class="label">Recorded size</div></div>
-      <div class="stat-box" id="live-stat-disk-box"><div class="value" id="live-stat-disk">–</div><div class="label">Free on disk</div></div>
+      <div class="stat-box" id="live-stat-disk-box"><div class="value" id="live-stat-disk">–</div><div class="label" id="live-stat-disk-label">Free on disk</div></div>
+      <div class="stat-box accent"><div class="value" id="live-stat-avgspeed">–</div><div class="label">Avg speed</div></div>
     </div>
 
     <!-- Add model + site picker -->
@@ -3423,6 +3443,8 @@ function _liveApplyStats(s) {
   document.getElementById('live-stat-size').textContent = bytesHuman(s.total_bytes || 0);
   { const sp = document.getElementById('live-stat-speed');
     if (sp) sp.textContent = (s.download_bps && s.download_bps > 0) ? (bytesHuman(s.download_bps) + '/s') : '0 B/s'; }
+  { const a = document.getElementById('live-stat-avgspeed');
+    if (a) a.textContent = (s.download_bps_avg && s.download_bps_avg > 0) ? (bytesHuman(s.download_bps_avg) + '/s') : '0 B/s'; }
   // Free disk on the recordings drive, color-coded by how full it is.
   try {
     const box = document.getElementById('live-stat-disk-box');
@@ -3447,12 +3469,45 @@ function _liveApplyStats(s) {
       }
     }
   } catch (_) {}
+  // RAG health pill + uptime
+  try {
+    const h = s.health || { level: 'healthy', reasons: [] };
+    const pill = document.getElementById('live-health');
+    const txt = document.getElementById('live-health-text');
+    if (pill && txt) {
+      const map = { healthy: ['green', 'System healthy'], degraded: ['amber', 'Degraded'], problem: ['red', 'Problem'] };
+      const m = map[h.level] || map.healthy;
+      pill.className = 'health-pill ' + m[0];
+      txt.textContent = (h.reasons && h.reasons.length) ? (m[1] + ' — ' + h.reasons.join('; ')) : m[1];
+    }
+    const up = document.getElementById('live-uptime');
+    if (up && s.uptime_s != null) up.textContent = '· up ' + durHuman(s.uptime_s);
+  } catch (_) {}
+  // Disk-fill ETA -> disk box tooltip + label hint
+  try {
+    const box = document.getElementById('live-stat-disk-box');
+    const lbl = document.getElementById('live-stat-disk-label');
+    const eta = s.disk_full_eta_s;
+    if (box) box.setAttribute('data-tip', (eta != null) ? ('~' + durHuman(eta) + ' until full at current net write rate') : 'Not filling — merger/cleanup keeping pace');
+    if (lbl) lbl.textContent = (eta != null && eta < 24 * 3600) ? ('Free · full in ~' + durHuman(eta)) : 'Free on disk';
+  } catch (_) {}
   // Top bar "Live" tab badge (only show count when > 0)
   const badge = document.getElementById('tab-live-badge');
   if (badge) {
     if ((s.recording || 0) > 0) { badge.textContent = s.recording; badge.hidden = false; }
     else { badge.hidden = true; }
   }
+}
+
+// Compact duration formatter (uptime, disk-full ETA)
+function durHuman(sec) {
+  sec = Math.max(0, Math.round(sec || 0));
+  if (sec < 90) return sec + 's';
+  const m = Math.round(sec / 60);
+  if (m < 90) return m + 'm';
+  const h = sec / 3600;
+  if (h < 48) return (h < 10 ? h.toFixed(1) : Math.round(h)) + 'h';
+  return Math.round(h / 24) + 'd';
 }
 
 // Fast stats-only refresh via /api/live/summary (no model list, no card

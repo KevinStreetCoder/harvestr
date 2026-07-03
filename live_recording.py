@@ -1096,19 +1096,27 @@ class LiveManager:
                 "peak_hour_utc": freq.get("peak_hour_utc", -1),
             })
 
+        summary = {
+            "total": len(models),
+            "running": sum(1 for m in models if m["running"]),
+            "recording": recording_count,
+            "total_bytes": total_sessions_bytes,
+            "status_hist": status_hist,
+            "download_bps": self._download_speed(_active_files),
+            **self._disk_summary(),
+        }
+        summary["download_bps_avg"] = getattr(self, "_download_bps_avg", 0.0)
+        summary["uptime_s"] = self._uptime()
+        summary["disk_full_eta_s"] = self._disk_eta(summary.get("disk_free_bytes"))
+        summary["health"] = self._compute_health(summary)
+        # cache the derived bits so the cheap live_summary can serve them too
+        self._health = summary["health"]
+        self._disk_full_eta_s = summary["disk_full_eta_s"]
         return {
             "available": available,
             "import_error": import_error,
             "streamonitor_path": _STREAMONITOR_PATH or "",
-            "summary": {
-                "total": len(models),
-                "running": sum(1 for m in models if m["running"]),
-                "recording": recording_count,
-                "total_bytes": total_sessions_bytes,
-                "status_hist": status_hist,
-                "download_bps": self._download_speed(_active_files),
-                **self._disk_summary(),
-            },
+            "summary": summary,
             "models": models,
         }
 
@@ -1136,7 +1144,71 @@ class LiveManager:
         self._speed_prev_time = now
         bps = (grown / (now - prev_t)) if (prev_t and now > prev_t) else 0.0
         self._download_bps = bps
+        # rolling average over ~3 min (at the 2s build cadence)
+        samples = getattr(self, "_speed_samples", None)
+        if samples is None:
+            from collections import deque as _deque
+            samples = self._speed_samples = _deque(maxlen=90)
+        if prev_t is not None:            # skip the first (no real interval) sample
+            samples.append(bps)
+        self._download_bps_avg = (sum(samples) / len(samples)) if samples else 0.0
         return bps
+
+    def _uptime(self) -> float:
+        import time as _t
+        bt = getattr(self, "_boot_time", None)
+        if bt is None:
+            bt = self._boot_time = _t.monotonic()
+        return _t.monotonic() - bt
+
+    def _disk_eta(self, free) -> Optional[float]:
+        """Seconds until the recordings drive fills, from the NET fill rate
+        (delta free bytes), which accounts for the user's merger deleting
+        fragments -- not just the record write rate. None if not filling."""
+        import time as _t
+        if free is None:
+            return None
+        now = _t.monotonic()
+        pf = getattr(self, "_disk_free_prev", None)
+        pt = getattr(self, "_disk_free_prev_t", None)
+        self._disk_free_prev = free
+        self._disk_free_prev_t = now
+        if pf is None or pt is None or now <= pt:
+            return None
+        fill = (pf - free) / (now - pt)   # +ve = filling up
+        ema = getattr(self, "_disk_fill_ema", None)
+        fill = (0.25 * fill + 0.75 * ema) if ema is not None else fill
+        self._disk_fill_ema = fill
+        return (free / fill) if fill > 1024 else None
+
+    def _compute_health(self, s: Dict[str, Any]) -> Dict[str, Any]:
+        """RAG health -- the worst of disk / data-flow / coverage / errors, with
+        human reasons. Green = data flowing + disk OK; escalates on real trouble."""
+        lvl = 0  # 0 green, 1 amber, 2 red
+        reasons: List[str] = []
+        used = s.get("disk_used_pct")
+        if used is not None:
+            if used >= 95:
+                lvl = 2; reasons.append(f"disk {used:.0f}% full")
+            elif used >= 85:
+                lvl = max(lvl, 1); reasons.append(f"disk {used:.0f}% full")
+        rec = s.get("recording", 0)
+        avg = s.get("download_bps_avg") or 0
+        if rec >= 3 and avg <= 0:
+            lvl = 2; reasons.append("recordings not writing data")
+        hist = s.get("status_hist", {}) or {}
+        pub = hist.get("PUBLIC", 0); err = hist.get("ERROR", 0)
+        if pub >= 12 and rec < pub * 0.55:
+            lvl = max(lvl, 1); reasons.append(f"{pub - rec} online models not recording")
+        online = pub + hist.get("PRIVATE", 0) + rec
+        if err >= 10 and (online == 0 or err > online * 0.2):
+            lvl = max(lvl, 1); reasons.append(f"{err} models in ERROR")
+        eta = s.get("disk_full_eta_s")
+        if eta is not None and eta < 3600:
+            lvl = 2; reasons.append("disk fills in under 1h")
+        elif eta is not None and eta < 6 * 3600:
+            lvl = max(lvl, 1); reasons.append("disk fills in under 6h")
+        return {"level": ["healthy", "degraded", "problem"][lvl], "reasons": reasons}
 
     def _disk_summary(self) -> Dict[str, Any]:
         """Free/total bytes on the recordings drive — for the UI disk gauge."""
@@ -1185,6 +1257,10 @@ class LiveManager:
             "total": len(bots), "running": running, "recording": recording,
             "total_bytes": total_bytes, "status_hist": status_hist,
             "download_bps": getattr(self, "_download_bps", 0.0),  # live write speed (get_snapshot computes it)
+            "download_bps_avg": getattr(self, "_download_bps_avg", 0.0),
+            "uptime_s": self._uptime(),
+            "disk_full_eta_s": getattr(self, "_disk_full_eta_s", None),
+            "health": getattr(self, "_health", {"level": "healthy", "reasons": []}),
         }
         out.update(self._disk_summary())
         cache["data"] = out

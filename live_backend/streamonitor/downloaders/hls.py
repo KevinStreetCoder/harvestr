@@ -187,6 +187,13 @@ class _RollingM3UWriter:
         self.audio_path = os.path.join(self.model_dir, "rolling_audio.m3u8")
         self.master_path = os.path.join(self.model_dir, "master.m3u8")
         if self.audio_url:
+            # Placeholder audio playlist so ffmpeg always finds the file even if
+            # the first mirror hasn't landed yet; _mirror_audio fills in segments.
+            try:
+                with open(self.audio_path, "w", encoding="utf-8") as f:
+                    f.write("#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n")
+            except Exception:
+                pass
             # Static local master muxing the two local rolling playlists. ffmpeg
             # reads this; each rolling file carries absolute (remote) segment URLs
             # that fetch direct (not fingerprint-blocked).

@@ -789,6 +789,29 @@ INDEX_HTML = r"""
   .health-pill.red .hp-dot { background: var(--bad); box-shadow: 0 0 8px var(--bad); animation: hp-pulse 1.2s infinite; }
   @keyframes hp-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
 
+  /* Monitor widgets (sparkline / VPN / per-site / alerts / top recorders) */
+  .mon-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin-bottom: 14px; }
+  .mon-card { background: var(--bg-2); border: 1px solid var(--border); border-radius: 10px; padding: 11px 13px; min-width: 0; }
+  .mon-title { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--text-3); margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+  .mon-cur { color: var(--accent); font-weight: 700; text-transform: none; letter-spacing: 0; font-size: 13px; }
+  .mon-spark { width: 100%; height: 46px; display: block; }
+  .mon-sub { font-size: 11.5px; color: var(--text-3); margin-top: 6px; }
+  .mon-vpn { font-size: 12.5px; line-height: 1.65; }
+  .mon-vpn b { color: var(--text); } .mon-vpn .muted { color: var(--text-3); }
+  .mon-site-dots { display: flex; flex-wrap: wrap; gap: 6px; }
+  .site-dot { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; padding: 3px 8px; border-radius: 12px; background: var(--bg); border: 1px solid var(--border); }
+  .site-dot .d { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+  .site-dot .d.green { background: var(--good); } .site-dot .d.amber { background: var(--warn); }
+  .site-dot .d.red { background: var(--bad); box-shadow: 0 0 6px var(--bad); }
+  .mon-list { max-height: 180px; overflow-y: auto; font-size: 12px; display: flex; flex-direction: column; gap: 2px; }
+  .mon-list .ev { display: flex; gap: 8px; padding: 2px 4px; border-radius: 4px; }
+  .mon-list .ev .t { color: var(--text-3); flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+  .mon-list .ev.WARNING .m { color: var(--warn); } .mon-list .ev.ERROR .m { color: var(--bad); }
+  .mon-list .ev .m { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mon-list .toprow { display: flex; justify-content: space-between; gap: 8px; padding: 2px 4px; }
+  .mon-list .toprow .mb { color: var(--accent); font-weight: 600; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+  .mon-list .toprow .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
   /* Site picker */
   .site-tabs { display: flex; gap: 2px; background: var(--bg); padding: 3px;
                border-radius: 8px; border: 1px solid var(--border); margin-bottom: 12px; }
@@ -1963,6 +1986,36 @@ INDEX_HTML = r"""
       <div class="stat-box warn"><div class="value" id="live-stat-size">–</div><div class="label">Recorded size</div></div>
       <div class="stat-box" id="live-stat-disk-box"><div class="value" id="live-stat-disk">–</div><div class="label" id="live-stat-disk-label">Free on disk</div></div>
       <div class="stat-box accent"><div class="value" id="live-stat-avgspeed">–</div><div class="label">Avg speed</div></div>
+    </div>
+
+    <!-- Monitor widgets: sparkline + VPN + per-site dots -->
+    <div class="mon-row">
+      <div class="mon-card">
+        <div class="mon-title">Write speed <span id="mon-spark-cur" class="mon-cur"></span></div>
+        <svg id="mon-sparkline" class="mon-spark" viewBox="0 0 300 46" preserveAspectRatio="none">
+          <polyline id="mon-spark-line" fill="none" stroke="var(--accent)" stroke-width="1.6" points=""></polyline>
+        </svg>
+        <div class="mon-sub" id="mon-continuity">–</div>
+      </div>
+      <div class="mon-card">
+        <div class="mon-title">VPN exit</div>
+        <div id="mon-vpn" class="mon-vpn">–</div>
+      </div>
+      <div class="mon-card">
+        <div class="mon-title">Sites</div>
+        <div id="mon-site-dots" class="mon-site-dots">–</div>
+      </div>
+    </div>
+    <!-- Alerts feed + top recorders -->
+    <div class="mon-row">
+      <div class="mon-card mon-grow">
+        <div class="mon-title">Recent events</div>
+        <div id="mon-alerts" class="mon-list">–</div>
+      </div>
+      <div class="mon-card mon-grow">
+        <div class="mon-title">Top recorders (live)</div>
+        <div id="mon-top" class="mon-list">–</div>
+      </div>
     </div>
 
     <!-- Add model + site picker -->
@@ -3497,6 +3550,7 @@ function _liveApplyStats(s) {
     if ((s.recording || 0) > 0) { badge.textContent = s.recording; badge.hidden = false; }
     else { badge.hidden = true; }
   }
+  try { _liveApplyMonitor(s); } catch (_) {}
 }
 
 // Compact duration formatter (uptime, disk-full ETA)
@@ -3510,6 +3564,87 @@ function durHuman(sec) {
   return Math.round(h / 24) + 'd';
 }
 
+// ── Monitor widgets: sparkline / continuity / per-site / alerts / top / RED alert
+let _lastHealthLevel = 'healthy';
+function _liveApplyMonitor(s) {
+  // Speed sparkline
+  try {
+    const cur = document.getElementById('mon-spark-cur');
+    if (cur) cur.textContent = (s.download_bps > 0 ? bytesHuman(s.download_bps) + '/s' : '');
+    const hist = s.speed_hist || [], line = document.getElementById('mon-spark-line');
+    if (line && hist.length > 1) {
+      const max = Math.max(1, ...hist), n = hist.length;
+      line.setAttribute('points', hist.map((v, i) =>
+        ((i / (n - 1)) * 300).toFixed(1) + ',' + (44 - (v / max) * 42).toFixed(1)).join(' '));
+    }
+  } catch (_) {}
+  // Continuity
+  try {
+    const c = document.getElementById('mon-continuity');
+    if (c) c.textContent = 'avg fragment ' + (s.avg_fragment_mb ? Math.round(s.avg_fragment_mb) + ' MB' : '–') +
+      ' · avg ' + (s.download_bps_avg > 0 ? bytesHuman(s.download_bps_avg) + '/s' : '0 B/s');
+  } catch (_) {}
+  // Per-site RAG dots
+  try {
+    const el = document.getElementById('mon-site-dots'), sites = s.sites || [];
+    if (el) el.innerHTML = sites.length ? sites.map(x =>
+      `<span class="site-dot" data-tip="${x.recording}/${x.public} recording, ${x.error} error"><span class="d ${x.level}"></span>${escapeHtml(x.site)} ${x.recording}</span>`).join('')
+      : '<span class="muted">–</span>';
+  } catch (_) {}
+  // Alerts feed
+  try {
+    const el = document.getElementById('mon-alerts'), a = s.alerts || [];
+    if (el) el.innerHTML = a.length ? a.map(ev => {
+      const t = new Date(ev.ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      return `<div class="ev ${ev.level}"><span class="t">${t}</span><span class="m" data-tip="${escapeHtml(ev.msg)}">${escapeHtml(ev.msg)}</span></div>`;
+    }).join('') : '<span class="muted">no recent warnings</span>';
+  } catch (_) {}
+  // Top recorders
+  try {
+    const el = document.getElementById('mon-top'), t = s.top_recorders || [];
+    if (el) el.innerHTML = t.length ? t.map(r =>
+      `<div class="toprow"><span class="nm">${escapeHtml(r.username)} <span class="muted">${escapeHtml(r.site)}</span></span><span class="mb">${r.mb} MB</span></div>`).join('')
+      : '<span class="muted">–</span>';
+  } catch (_) {}
+  // RED desktop + sound alert (only on transition INTO problem)
+  try {
+    const lvl = (s.health && s.health.level) || 'healthy';
+    if (lvl === 'problem' && _lastHealthLevel !== 'problem')
+      _notifyRed('Harvestr problem — ' + (((s.health || {}).reasons || []).join('; ') || 'recorder needs attention'));
+    _lastHealthLevel = lvl;
+  } catch (_) {}
+}
+async function pollVpnStatus() {
+  try {
+    const r = await fetch('/api/live/vpnstatus'); if (!r.ok) return;
+    const v = await r.json(), el = document.getElementById('mon-vpn'); if (!el) return;
+    if (!v.configured && !v.exit_ip) { el.innerHTML = '<span class="muted">VPN not detected</span>'; return; }
+    const flag = v.country ? _countryFlag(v.country) : '';
+    const rot = v.configured ? ('rotation armed · ' + (v.locations || []).join('/')) : 'rotation off';
+    const last = (v.last_rotate_ago_s != null) ? ('last rotate ' + durHuman(v.last_rotate_ago_s) + ' ago') : 'no rotations yet';
+    el.innerHTML =
+      `<div><b>${flag} ${v.country || '?'}</b> <span class="muted">${escapeHtml(v.relay || '')}</span></div>` +
+      `<div>${escapeHtml(v.exit_ip || '–')} <span class="muted">${v.connected ? 'connected' : 'reconnecting'}</span></div>` +
+      `<div class="muted">${rot}</div><div class="muted">${last}</div>`;
+  } catch (_) {}
+}
+function _countryFlag(cc) { try { return cc.toUpperCase().replace(/./g, c => String.fromCodePoint(127397 + c.charCodeAt(0))); } catch (_) { return ''; } }
+function _notifyRed(msg) {
+  try { toast(msg, 'error'); } catch (_) {}
+  try {
+    if ('Notification' in window) {
+      if (Notification.permission === 'granted') new Notification('Harvestr', { body: msg });
+      else if (Notification.permission !== 'denied') Notification.requestPermission();
+    }
+  } catch (_) {}
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination); o.frequency.value = 660; g.gain.value = 0.08;
+    o.start(); o.frequency.setValueAtTime(440, ctx.currentTime + 0.15); o.stop(ctx.currentTime + 0.3);
+  } catch (_) {}
+}
+
 // Fast stats-only refresh via /api/live/summary (no model list, no card
 // re-render) for snappy header updates between the heavier full refreshes.
 let _liveLastSig = '';
@@ -3521,6 +3656,8 @@ async function liveSummaryRefresh() {
     if (!data || data.available === false) return;
     const s = data.summary || {};
     _liveApplyStats(s);
+    // VPN exit panel: poll its own endpoint at most every 30s (external IP lookup).
+    if (Date.now() - (window._lastVpnPoll || 0) > 30000) { window._lastVpnPoll = Date.now(); pollVpnStatus(); }
     // Refresh cards immediately on STRUCTURAL changes (model added/removed or
     // started/stopped polling). Deliberately excludes the recording count,
     // which flickers constantly at scale and would force a full re-render every

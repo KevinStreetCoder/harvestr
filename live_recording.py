@@ -1224,12 +1224,14 @@ class LiveManager:
         return bps
 
     def _network_stats(self) -> float:
-        """System-wide network DOWNLOAD rate (psutil bytes_recv delta) -- the true
-        bytes-off-the-wire throughput. Distinct from the write speed (file growth):
-        network includes protocol/segment overhead, retries and proxy/VPN traffic,
-        and reflects the actual link utilisation, while the write speed lags behind
-        ffmpeg's buffer. Time-gated to ~1s so it's safe to call from BOTH
-        get_snapshot and the cheap live_summary without double-sampling."""
+        """True internet DOWNLOAD rate: the busiest single interface's bytes_recv
+        delta. NOT the sum across interfaces -- a VPN tunnel (WireGuard/Mullvad)
+        carries the SAME payload as the physical NIC (decrypted on the TUN,
+        encrypted on the wire), so summing double-counts it (~2x; verified live:
+        Mullvad 11.9 + WiFi 12.2 MB/s for one ~12 MB/s stream). Max over per-NIC
+        rates (loopback excluded) recovers the real rate. Distinct from the write
+        speed (file growth), which lags ffmpeg's buffer. Time-gated ~1s so it's
+        safe to call from BOTH get_snapshot and the cheap live_summary."""
         import time as _t
         from collections import deque as _dq
         now = _t.monotonic()
@@ -1238,15 +1240,26 @@ class LiveManager:
             return getattr(self, "_network_bps", 0.0)  # too soon -> reuse last rate
         try:
             import psutil
-            recv = int(psutil.net_io_counters().bytes_recv)
+            per = psutil.net_io_counters(pernic=True)
+            cur = {nic: int(c.bytes_recv) for nic, c in per.items()
+                   if "loopback" not in nic.lower() and nic.lower() != "lo"}
         except Exception:
             return getattr(self, "_network_bps", 0.0)
-        prev = getattr(self, "_net_prev", None)
-        self._net_prev = recv
+        prev = getattr(self, "_net_prev", None)  # dict {nic: bytes_recv}
+        self._net_prev = cur
         self._net_prev_time = now
-        if prev is None or recv < prev:  # first sample or counter reset/wrap
+        if not isinstance(prev, dict) or not prev:  # first sample
             return getattr(self, "_network_bps", 0.0)
-        bps = (recv - prev) / (now - prev_t) if now > prev_t else 0.0
+        dt = (now - prev_t) or 1.0
+        # MAX single-interface rate, not the sum -- the VPN tunnel and the physical
+        # NIC each carry the same payload, so summing double-counts (~2x).
+        bps = 0.0
+        for nic, v in cur.items():
+            p = prev.get(nic)
+            if p is not None and v >= p:
+                r = (v - p) / dt
+                if r > bps:
+                    bps = r
         self._network_bps = bps
         samples = getattr(self, "_net_samples", None)
         if samples is None:

@@ -443,6 +443,11 @@ class LiveManager:
         # One-shot background sweep to run the folder scans deferred during
         # _restore() above, without blocking boot.
         self._scan_sweeper = self._start_scan_sweeper()
+        # Self-clean the rolling-playlist temp dirs (M3U8_TMP) the writer leaves
+        # behind when recordings end: sweep ~20s after boot, then every 30 min, so
+        # the temp root never accumulates stale dirs across runs. Only removes dirs
+        # idle > 2 min, so active recordings are never touched.
+        self._tmp_sweeper = self._start_tmp_sweeper()
         # Optional Mullvad VPN auto-rotation: rotate the exit IP on a rate-limit
         # storm, then wake the affected bots. No-op unless configured
         # (vpn_config.json / STRMNTR_VPN_ROTATE) -- see VPN_SETUP.md.
@@ -489,6 +494,28 @@ class LiveManager:
 
         t = threading.Thread(target=_loop, name="live-scan-sweeper",
                              daemon=True)
+        t.start()
+        return t
+
+    def _start_tmp_sweeper(self):
+        """Background: purge stale rolling-playlist temp dirs (M3U8_TMP) the writer
+        leaves behind when recordings end. Sweeps ~20s after boot (clears past-run
+        leftovers), then every 30 min. sweep_stale_tmp_dirs() only removes dirs
+        idle > 2 min, so active recordings are never touched."""
+        def _loop():
+            import time as _t
+            try:
+                from streamonitor.downloaders.hls import sweep_stale_tmp_dirs
+            except Exception:
+                return
+            _t.sleep(20)  # let boot settle before the first sweep
+            while True:
+                try:
+                    sweep_stale_tmp_dirs(120.0, logger=log)
+                except Exception:
+                    pass
+                _t.sleep(1800)  # every 30 min
+        t = threading.Thread(target=_loop, name="live-tmp-sweeper", daemon=True)
         t.start()
         return t
 

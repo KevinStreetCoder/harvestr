@@ -84,6 +84,56 @@ def _get_tmp_root(self: Bot) -> str:
     return candidate
 
 
+def sweep_stale_tmp_dirs(max_age_sec: float = 120.0, logger: Any = None) -> int:
+    """Purge idle per-model temp dirs the rolling-playlist writer leaves behind
+    when a recording ends (and leftovers from past runs). A dir is stale only when
+    its NEWEST file has been idle >= max_age_sec -- active writers rewrite
+    rolling.m3u8 every ~1.5s, so live recordings (and VPN grace-window pauses) are
+    spared. Returns the count removed. Safe no-op if the temp root is missing."""
+    import time as _t
+    import shutil as _sh
+    root = _HLS_TMP_DIR
+    if not root:
+        try:
+            here = os.path.abspath(__file__)  # .../live_backend/streamonitor/downloaders/hls.py
+            root = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(here))), TEMP_DIR_NAME)
+        except Exception:
+            return 0
+    if not os.path.isdir(root):
+        return 0
+    now = _t.time()
+    removed = 0
+    try:
+        names = os.listdir(root)
+    except Exception:
+        return 0
+    for name in names:
+        d = os.path.join(root, name)
+        if not os.path.isdir(d):
+            continue
+        try:
+            newest = os.path.getmtime(d)
+            try:
+                for f in os.listdir(d):
+                    m = os.path.getmtime(os.path.join(d, f))
+                    if m > newest:
+                        newest = m
+            except OSError:
+                pass
+            if (now - newest) >= max_age_sec:
+                _sh.rmtree(d, ignore_errors=True)
+                if not os.path.isdir(d):
+                    removed += 1
+        except OSError:
+            continue
+    if removed and logger is not None:
+        try:
+            logger.info(f"[live] tmp-sweep removed {removed} stale M3U8_TMP dirs")
+        except Exception:
+            pass
+    return removed
+
+
 def _abs_with_parent_query(base_url: str, maybe_rel: str) -> str:
     """Make URL absolute and inherit parent query parameters."""
     base = urlparse(base_url)

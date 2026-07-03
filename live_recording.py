@@ -1308,13 +1308,20 @@ class LiveManager:
         now = _t.monotonic()
         pf = getattr(self, "_disk_free_prev", None)
         pt = getattr(self, "_disk_free_prev_t", None)
+        # Sample the net fill rate over a MEANINGFUL window (>=30s). Free-space
+        # deltas across the ~2s snapshot cadence are far too noisy -- a single
+        # bursty ffmpeg flush (or the merger's delete) gets extrapolated into a
+        # wildly short ETA, which flapped the health pill to "degraded". Between
+        # samples, reuse the last ETA.
+        if pf is not None and pt is not None and (now - pt) < 30:
+            return getattr(self, "_disk_full_eta_s", None)
         self._disk_free_prev = free
         self._disk_free_prev_t = now
         if pf is None or pt is None or now <= pt:
             return None
         fill = (pf - free) / (now - pt)   # +ve = filling up
         ema = getattr(self, "_disk_fill_ema", None)
-        fill = (0.25 * fill + 0.75 * ema) if ema is not None else fill
+        fill = (0.35 * fill + 0.65 * ema) if ema is not None else fill
         self._disk_fill_ema = fill
         return (free / fill) if fill > 1024 else None
 

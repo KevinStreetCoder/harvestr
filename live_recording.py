@@ -41,6 +41,43 @@ from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger("harvestr.live")
 
+
+# ── Alerts ring buffer ───────────────────────────────────────────────────────
+# Keeps the last WARNING+/ERROR log records for the UI "alerts feed" (the RAG's
+# why-as-a-history). Attaches to the ROOT logger so it also captures the vendored
+# site/bot/downloader warnings (rotations, model-deleted, stuck models, etc.).
+class _RingLogHandler(logging.Handler):
+    def __init__(self, maxlen: int = 80):
+        super().__init__(level=logging.WARNING)
+        from collections import deque
+        self.records = deque(maxlen=maxlen)
+
+    def emit(self, record):
+        try:
+            self.records.append({
+                "ts": record.created,
+                "level": record.levelname,
+                "msg": record.getMessage()[:200],
+            })
+        except Exception:
+            pass
+
+
+_ALERTS = _RingLogHandler(80)
+try:
+    logging.getLogger().addHandler(_ALERTS)
+except Exception:
+    pass
+
+
+def recent_alerts(limit: int = 40) -> list:
+    """Most-recent-first list of the last WARNING+ log records for the UI feed."""
+    try:
+        return list(_ALERTS.records)[-limit:][::-1]
+    except Exception:
+        return []
+
+
 # ── Discovery ────────────────────────────────────────────────────────────────
 # Preference order:
 #   1. HARVESTR_STREAMONITOR env var (dev override)
@@ -1010,7 +1047,8 @@ class LiveManager:
         recording_count = 0
         total_sessions_bytes = 0
         status_hist: Dict[str, int] = {}
-        _active_files: List[str] = []  # live recording output paths, for write-speed
+        _active: List = []                        # (path, username, site) for recording bots
+        _sites: Dict[str, Dict[str, int]] = {}    # per-site tally for the mini RAG dots
 
         # Lazy-init the history tracker (file-backed)
         if getattr(self, "_history", None) is None:
@@ -1037,11 +1075,18 @@ class LiveManager:
             label, color = status_ui(status_name)
             is_running = bool(getattr(bot, "running", False))
             is_recording = bool(getattr(bot, "recording", False))
+            _s = _sites.setdefault(rm.site, {"total": 0, "recording": 0, "public": 0, "error": 0})
+            _s["total"] += 1
+            if status_name == "PUBLIC":
+                _s["public"] += 1
+            elif status_name == "ERROR":
+                _s["error"] += 1
             if is_recording:
                 recording_count += 1
+                _s["recording"] += 1
                 _out = getattr(bot, "_current_output", None)
                 if _out:
-                    _active_files.append(_out)
+                    _active.append((_out, rm.username, rm.site))
             # Total file size for this model (StreaMonitor caches in
             # video_files_total_size on the Bot)
             size_bytes = int(getattr(bot, "video_files_total_size", 0) or 0)
@@ -1102,16 +1147,22 @@ class LiveManager:
             "recording": recording_count,
             "total_bytes": total_sessions_bytes,
             "status_hist": status_hist,
-            "download_bps": self._download_speed(_active_files),
+            "download_bps": self._active_stats(_active),
             **self._disk_summary(),
         }
         summary["download_bps_avg"] = getattr(self, "_download_bps_avg", 0.0)
+        summary["avg_fragment_mb"] = getattr(self, "_avg_fragment_mb", 0.0)
+        summary["top_recorders"] = getattr(self, "_top_recorders", [])
+        summary["speed_hist"] = list(getattr(self, "_speed_hist", []))
+        summary["sites"] = self._site_health(_sites)
+        summary["alerts"] = recent_alerts()
         summary["uptime_s"] = self._uptime()
         summary["disk_full_eta_s"] = self._disk_eta(summary.get("disk_free_bytes"))
         summary["health"] = self._compute_health(summary)
         # cache the derived bits so the cheap live_summary can serve them too
         self._health = summary["health"]
         self._disk_full_eta_s = summary["disk_full_eta_s"]
+        self._sites_health = summary["sites"]
         return {
             "available": available,
             "import_error": import_error,
@@ -1120,39 +1171,70 @@ class LiveManager:
             "models": models,
         }
 
-    def _download_speed(self, active_files: List[str]) -> float:
-        """Aggregate LIVE write rate (bytes/sec) across the currently-recording
-        output files, via real os.path.getsize (video_files_total_size is only
-        cache-updated so it can't show live speed). Tracks per-file growth so a
-        file entering/leaving the active set doesn't spike it. Cached on
-        self._download_bps so the cheap live_summary can serve it too."""
+    def _active_stats(self, active) -> float:
+        """From the currently-recording files (real os.path.getsize -- the cached
+        video_files_total_size can't show live speed) compute in ONE pass: live
+        write speed (per-file growth), its rolling average, a ~16-min history for
+        the sparkline, avg active fragment size (re-auth continuity signal), and
+        the top recorders. `active` = list of (path, username, site)."""
         import os as _os, time as _t
+        from collections import deque as _dq
         now = _t.monotonic()
         prev = getattr(self, "_speed_prev", None) or {}
         prev_t = getattr(self, "_speed_prev_time", None)
         cur: Dict[str, int] = {}
         grown = 0
-        for p in active_files:
+        sized = []  # (size, username, site)
+        for path, uname, site in active:
             try:
-                sz = _os.path.getsize(p)
+                sz = _os.path.getsize(path)
             except Exception:
                 continue
-            cur[p] = sz
-            if p in prev and sz > prev[p]:
-                grown += sz - prev[p]
+            cur[path] = sz
+            if path in prev and sz > prev[path]:
+                grown += sz - prev[path]
+            sized.append((sz, uname, site))
         self._speed_prev = cur
         self._speed_prev_time = now
         bps = (grown / (now - prev_t)) if (prev_t and now > prev_t) else 0.0
         self._download_bps = bps
-        # rolling average over ~3 min (at the 2s build cadence)
         samples = getattr(self, "_speed_samples", None)
         if samples is None:
-            from collections import deque as _deque
-            samples = self._speed_samples = _deque(maxlen=90)
-        if prev_t is not None:            # skip the first (no real interval) sample
+            samples = self._speed_samples = _dq(maxlen=90)
+        if prev_t is not None:
             samples.append(bps)
         self._download_bps_avg = (sum(samples) / len(samples)) if samples else 0.0
+        # sparkline history: ~16 min at a ~16s cadence (every 8th 2s build)
+        hist = getattr(self, "_speed_hist", None)
+        if hist is None:
+            hist = self._speed_hist = _dq(maxlen=64)
+        ctr = getattr(self, "_speed_hist_ctr", 0) + 1
+        self._speed_hist_ctr = ctr
+        if ctr % 8 == 0:
+            hist.append(int(bps))
+        szs = [s for s, _, _ in sized]
+        self._avg_fragment_mb = (sum(szs) / len(szs) / 1e6) if szs else 0.0
+        self._top_recorders = [
+            {"username": u, "site": st, "mb": round(s / 1e6, 1)}
+            for s, u, st in sorted(sized, reverse=True)[:6]
+        ]
         return bps
+
+    def _site_health(self, sites: Dict[str, Dict[str, int]]) -> list:
+        """Per-site mini RAG: red if online models exist but few record, amber on
+        a notable ERROR share, else green. Sorted by recording desc."""
+        out = []
+        for site, d in sites.items():
+            pub, rec, err = d["public"], d["recording"], d["error"]
+            level = "green"
+            if pub >= 4 and rec < pub * 0.5:
+                level = "red"
+            elif (pub >= 8 and rec < pub * 0.75) or (err >= 4 and err >= max(1, rec)):
+                level = "amber"
+            out.append({"site": site, "recording": rec, "public": pub,
+                        "error": err, "level": level})
+        out.sort(key=lambda x: -x["recording"])
+        return out
 
     def _uptime(self) -> float:
         import time as _t
@@ -1258,6 +1340,11 @@ class LiveManager:
             "total_bytes": total_bytes, "status_hist": status_hist,
             "download_bps": getattr(self, "_download_bps", 0.0),  # live write speed (get_snapshot computes it)
             "download_bps_avg": getattr(self, "_download_bps_avg", 0.0),
+            "avg_fragment_mb": getattr(self, "_avg_fragment_mb", 0.0),
+            "top_recorders": getattr(self, "_top_recorders", []),
+            "speed_hist": list(getattr(self, "_speed_hist", [])),
+            "sites": getattr(self, "_sites_health", []),
+            "alerts": recent_alerts(),
             "uptime_s": self._uptime(),
             "disk_full_eta_s": getattr(self, "_disk_full_eta_s", None),
             "health": getattr(self, "_health", {"level": "healthy", "reasons": []}),

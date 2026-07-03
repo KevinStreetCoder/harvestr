@@ -150,6 +150,48 @@ def status_text() -> str:
     return (r.stdout or "").strip() if r else ""
 
 
+_exit_cache = {"ts": 0.0, "data": None}
+
+
+def exit_info() -> dict:
+    """Current Mullvad exit for the UI VPN panel (cached ~30s -- the IP lookup is
+    an external call). Country is derived from the relay code (se-mma-wg-103 -> SE)."""
+    import time as _t, re as _re
+    now = _t.time()
+    c = _exit_cache
+    if c["data"] is not None and now - c["ts"] < 30:
+        return c["data"]
+    cfg = _load_cfg()
+    connected, relay = False, None
+    st = status_text()
+    if st:
+        connected = "Connected" in st
+        m = _re.search(r"([a-z]{2}-[a-z]+-(?:wg|ovpn)-\d+)", st)
+        if m:
+            relay = m.group(1)
+    ip = None
+    try:
+        import requests as _rq
+        ip = _rq.get("https://api.ipify.org", timeout=6).text.strip()
+    except Exception:
+        pass
+    locs = cfg.get("rotate_locations") or []
+    data = {
+        "configured": configured(),
+        "enabled": bool(cfg.get("enabled")),
+        "connected": connected,
+        "relay": relay,
+        "country": (relay.split("-")[0].upper() if relay else None),
+        "exit_ip": ip,
+        "locations": locs,
+        "next_location": (locs[_rotate_idx % len(locs)] if locs else None),
+        "last_rotate_ago_s": ((_t.monotonic() - _last_rotate) if _last_rotate else None),
+        "rotations": _rotate_idx,
+    }
+    c["ts"], c["data"] = now, data
+    return data
+
+
 def in_grace() -> bool:
     """True while a rotation is dropping / re-establishing the Mullvad tunnel
     (plus a short settle). EVERY Mullvad-routed recording sees a network gap

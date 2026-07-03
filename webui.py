@@ -4765,6 +4765,17 @@ def api_live_netconfig():
     })
 
 
+@app.route("/api/live/vpnstatus")
+def api_vpn_status():
+    """Current Mullvad exit (country / IP / relay) + rotation state for the UI VPN
+    panel. Cached ~30s in the rotator (the IP lookup is an external call)."""
+    try:
+        from streamonitor.utils import vpn_rotator as _vpn
+        return jsonify(_vpn.exit_info())
+    except Exception as e:
+        return jsonify({"configured": False, "error": str(e)})
+
+
 @app.route("/api/live/netconfig/rotate", methods=["POST"])
 def api_live_netconfig_rotate():
     """Manually rotate the Mullvad exit now. Also exercises the ride-through

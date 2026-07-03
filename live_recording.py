@@ -1151,6 +1151,9 @@ class LiveManager:
             **self._disk_summary(),
         }
         summary["download_bps_avg"] = getattr(self, "_download_bps_avg", 0.0)
+        summary["network_bps"] = self._network_stats()
+        summary["network_bps_avg"] = getattr(self, "_network_bps_avg", 0.0)
+        summary["network_hist"] = list(getattr(self, "_net_hist", []))
         summary["avg_fragment_mb"] = getattr(self, "_avg_fragment_mb", 0.0)
         summary["top_recorders"] = getattr(self, "_top_recorders", [])
         summary["speed_hist"] = list(getattr(self, "_speed_hist", []))
@@ -1218,6 +1221,45 @@ class LiveManager:
             {"username": u, "site": st, "mb": round(s / 1e6, 1)}
             for s, u, st in sorted(sized, reverse=True)[:6]
         ]
+        return bps
+
+    def _network_stats(self) -> float:
+        """System-wide network DOWNLOAD rate (psutil bytes_recv delta) -- the true
+        bytes-off-the-wire throughput. Distinct from the write speed (file growth):
+        network includes protocol/segment overhead, retries and proxy/VPN traffic,
+        and reflects the actual link utilisation, while the write speed lags behind
+        ffmpeg's buffer. Time-gated to ~1s so it's safe to call from BOTH
+        get_snapshot and the cheap live_summary without double-sampling."""
+        import time as _t
+        from collections import deque as _dq
+        now = _t.monotonic()
+        prev_t = getattr(self, "_net_prev_time", None)
+        if prev_t is not None and (now - prev_t) < 1.0:
+            return getattr(self, "_network_bps", 0.0)  # too soon -> reuse last rate
+        try:
+            import psutil
+            recv = int(psutil.net_io_counters().bytes_recv)
+        except Exception:
+            return getattr(self, "_network_bps", 0.0)
+        prev = getattr(self, "_net_prev", None)
+        self._net_prev = recv
+        self._net_prev_time = now
+        if prev is None or recv < prev:  # first sample or counter reset/wrap
+            return getattr(self, "_network_bps", 0.0)
+        bps = (recv - prev) / (now - prev_t) if now > prev_t else 0.0
+        self._network_bps = bps
+        samples = getattr(self, "_net_samples", None)
+        if samples is None:
+            samples = self._net_samples = _dq(maxlen=90)
+        samples.append(bps)
+        self._network_bps_avg = (sum(samples) / len(samples)) if samples else 0.0
+        hist = getattr(self, "_net_hist", None)
+        if hist is None:
+            hist = self._net_hist = _dq(maxlen=64)
+        ctr = getattr(self, "_net_hist_ctr", 0) + 1
+        self._net_hist_ctr = ctr
+        if ctr % 8 == 0:                 # ~ every 16s -> ~17 min of history at maxlen 64
+            hist.append(int(bps))
         return bps
 
     def _site_health(self, sites: Dict[str, Dict[str, int]]) -> list:
@@ -1340,6 +1382,9 @@ class LiveManager:
             "total_bytes": total_bytes, "status_hist": status_hist,
             "download_bps": getattr(self, "_download_bps", 0.0),  # live write speed (get_snapshot computes it)
             "download_bps_avg": getattr(self, "_download_bps_avg", 0.0),
+            "network_bps": self._network_stats(),                 # true off-the-wire rate (sampled here too)
+            "network_bps_avg": getattr(self, "_network_bps_avg", 0.0),
+            "network_hist": list(getattr(self, "_net_hist", [])),
             "avg_fragment_mb": getattr(self, "_avg_fragment_mb", 0.0),
             "top_recorders": getattr(self, "_top_recorders", []),
             "speed_hist": list(getattr(self, "_speed_hist", [])),

@@ -1982,10 +1982,10 @@ INDEX_HTML = r"""
       <div class="stat-box"><div class="value" id="live-stat-total">–</div><div class="label">Models tracked</div></div>
       <div class="stat-box accent"><div class="value" id="live-stat-running">–</div><div class="label">Polling</div></div>
       <div class="stat-box good"><div class="value" id="live-stat-recording">–</div><div class="label">Recording now</div></div>
-      <div class="stat-box accent"><div class="value" id="live-stat-speed">–</div><div class="label">Download speed</div></div>
+      <div class="stat-box accent"><div class="value" id="live-stat-speed">–</div><div class="label">Network ↓</div></div>
+      <div class="stat-box accent"><div class="value" id="live-stat-avgspeed">–</div><div class="label">Avg network</div></div>
       <div class="stat-box warn"><div class="value" id="live-stat-size">–</div><div class="label">Recorded size</div></div>
       <div class="stat-box" id="live-stat-disk-box"><div class="value" id="live-stat-disk">–</div><div class="label" id="live-stat-disk-label">Free on disk</div></div>
-      <div class="stat-box accent"><div class="value" id="live-stat-avgspeed">–</div><div class="label">Avg speed</div></div>
     </div>
 
     <!-- Monitor widgets: sparkline + VPN + per-site dots -->
@@ -3495,9 +3495,11 @@ function _liveApplyStats(s) {
   document.getElementById('live-stat-recording').textContent = s.recording ?? 0;
   document.getElementById('live-stat-size').textContent = bytesHuman(s.total_bytes || 0);
   { const sp = document.getElementById('live-stat-speed');
-    if (sp) sp.textContent = (s.download_bps && s.download_bps > 0) ? (bytesHuman(s.download_bps) + '/s') : '0 B/s'; }
+    const nb = (s.network_bps != null ? s.network_bps : s.download_bps);  // true off-the-wire rate; fall back to write speed
+    if (sp) sp.textContent = (nb && nb > 0) ? (bytesHuman(nb) + '/s') : '0 B/s'; }
   { const a = document.getElementById('live-stat-avgspeed');
-    if (a) a.textContent = (s.download_bps_avg && s.download_bps_avg > 0) ? (bytesHuman(s.download_bps_avg) + '/s') : '0 B/s'; }
+    const na = (s.network_bps_avg != null ? s.network_bps_avg : s.download_bps_avg);
+    if (a) a.textContent = (na && na > 0) ? (bytesHuman(na) + '/s') : '0 B/s'; }
   // Free disk on the recordings drive, color-coded by how full it is.
   try {
     const box = document.getElementById('live-stat-disk-box');

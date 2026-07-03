@@ -60,9 +60,15 @@ _CANDIDATES = [
 
 _STREAMONITOR_PATH: Optional[str] = None
 for _cand in _CANDIDATES:
-    if _cand and (Path(_cand) / "streamonitor" / "bot.py").exists():
-        _STREAMONITOR_PATH = _cand
-        break
+    try:
+        if _cand and (Path(_cand) / "streamonitor" / "bot.py").exists():
+            _STREAMONITOR_PATH = _cand
+            break
+    except OSError:
+        # A candidate on an UNMOUNTED drive (e.g. the D:\F\StreaMonitor fallback
+        # when this machine has no D:) makes .exists() raise [WinError 3] instead
+        # of returning False, which spammed the log ~1900x. Skip it and continue.
+        continue
 
 
 # ── Try to import the Bot framework ──────────────────────────────────────────

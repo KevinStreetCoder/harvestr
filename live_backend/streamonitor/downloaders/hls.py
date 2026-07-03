@@ -42,6 +42,10 @@ def _in_vpn_grace() -> bool:
 
 TEMP_DIR_NAME = "M3U8_TMP"
 
+# One-time guard so a Windows Application Control / AppLocker block on the ffmpeg
+# exe is surfaced clearly ONCE, not as a cryptic [WinError 4551] spammed per attempt.
+_FFMPEG_SPAWN_WARNED = False
+
 try:
     from parameters import HLS_TMP_DIR as _HLS_TMP_DIR
 except Exception:
@@ -609,16 +613,33 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
     _proxy = getattr(self, 'proxy', None) if getattr(self, 'capture_via_proxy', True) else None
     _env = {**os.environ, 'http_proxy': _proxy, 'https_proxy': _proxy,
             'HTTP_PROXY': _proxy, 'HTTPS_PROXY': _proxy} if _proxy else None
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        universal_newlines=True,
-        bufsize=1,
-        startupinfo=startupinfo,
-        creationflags=creationflags,
-        env=_env,
-    )
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            bufsize=1,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+            env=_env,
+        )
+    except OSError as e:
+        # Windows Application Control / AppLocker / Defender can block the ffmpeg
+        # exe from launching ([WinError 4551]); nothing records until it's
+        # whitelisted. Surface a clear ONE-TIME hint instead of the cryptic
+        # WinError spammed per attempt.
+        global _FFMPEG_SPAWN_WARNED
+        if not _FFMPEG_SPAWN_WARNED:
+            _FFMPEG_SPAWN_WARNED = True
+            self.logger.error(
+                f"ffmpeg failed to launch: {e}. If this is [WinError 4551], "
+                f"Windows Application Control/AppLocker is blocking ffmpeg "
+                f"({FFMPEG_PATH!r}) -- whitelist that exe (or run as admin). "
+                f"No recordings can run until it's allowed.")
+        else:
+            self.logger.debug(f"ffmpeg spawn failed: {e}")
+        return False
     proc_ref["p"] = proc
 
     # Watchdog: bound the recording by TIME, not retry count. A model can be

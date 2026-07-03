@@ -751,9 +751,11 @@ INDEX_HTML = r"""
                         border-color: var(--accent-2); }
   .perf-row .name { font-weight: 500; }
   .perf-row .count { margin-left: auto; color: var(--text-3); font-size: 11.5px; }
-  .perf-list { max-height: 420px; overflow-y: auto; padding-right: 4px; }
+  .perf-list { max-height: clamp(200px, 50vh, 420px); overflow-y: auto; padding-right: 4px; }
 
   .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 18px; }
+  @media (max-width: 768px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 480px) { .stats { grid-template-columns: 1fr; } }
   .stat-box {
     background: linear-gradient(180deg, var(--bg-2), #10141c);
     border: 1px solid var(--border); border-radius: 10px;
@@ -771,6 +773,7 @@ INDEX_HTML = r"""
   .stat-box.bad::before { background: var(--bad); }
   .stat-box.bad .value { color: var(--bad); }
   .stat-box.warn::before { background: var(--warn); }
+  .stat-box.warn .value { color: var(--warn); }
 
   /* Site picker */
   .site-tabs { display: flex; gap: 2px; background: var(--bg); padding: 3px;
@@ -781,7 +784,7 @@ INDEX_HTML = r"""
   }
   .site-tabs .tab.active { background: var(--bg-3); color: var(--accent); font-weight: 600; }
   .site-tabs .tab:hover:not(.active) { background: #1a2030; }
-  .site-list { max-height: 300px; overflow-y: auto; padding: 2px;
+  .site-list { max-height: clamp(150px, 40vh, 300px); overflow-y: auto; padding: 2px;
                background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
   .site-row {
     display: flex; align-items: center; gap: 10px;
@@ -1000,7 +1003,7 @@ INDEX_HTML = r"""
 
   /* Toasts – stacking container */
   #toast-stack {
-    position: fixed; top: 74px; right: 24px; z-index: 200;
+    position: fixed; top: 74px; right: 24px; z-index: 2000;
     display: flex; flex-direction: column; gap: 8px; max-width: min(420px, 90vw);
     pointer-events: none;
   }
@@ -1205,7 +1208,10 @@ INDEX_HTML = r"""
   /* Video preview modal */
   .modal-backdrop {
     position: fixed; inset: 0; background: #000000b0;
-    display: none; align-items: center; justify-content: center; z-index: 300;
+    /* Above the sticky header (500) and everything else so a modal is never
+       clipped by page chrome. Toasts (2000) + tooltips (9999) still layer above
+       so save confirmations and hints show over an open modal. */
+    display: none; align-items: center; justify-content: center; z-index: 1000;
   }
   .modal-backdrop.show { display: flex; }
   .modal-card {

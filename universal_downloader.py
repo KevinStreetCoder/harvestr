@@ -1073,7 +1073,7 @@ class UniversalDownloader:
         from overly-broad search results (e.g. /search/Macy/ matching 'Macy K',
         'Macy Cartel', 'Macy Meadows' etc. when we want Macy2000)."""
         max_v = max(hit.entry_count * 2, self.config.max_videos_per_site)
-        max_v = min(max_v, 1000)
+        max_v = min(max_v, 100000)
         try:
             vids = scraper.enumerate(hit, performer, limit=max_v)
         except Exception as e:

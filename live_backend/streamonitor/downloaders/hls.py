@@ -578,18 +578,30 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
 
     # Select best video variant + detect a SEPARATE audio rendition.
     #
-    # ON by default; set STRMNTR_CB_AUDIO=0 to force video-only.
+    # OPT-IN (STRMNTR_CB_AUDIO=1), DEFAULT OFF — CB records video-only.
     #
-    # History: this was opt-in/default-OFF (bf0700a) because enabling it made
-    # every CB capture produce empty files. Root cause, measured: ffmpeg was fed
-    # a LOCAL MASTER with an EXT-X-MEDIA audio group, and whenever the mirrored
-    # audio playlist had no segments yet, ffmpeg aborted at input-open and wrote
-    # a 0-byte file with NO streams -- which the no-data watchdog turned into a
-    # retry loop across the whole fleet. Handing the audio playlist to ffmpeg as
-    # a SECOND -i with an optional audio map degrades to video-only in exactly
-    # that case instead (verified: same empty-audio input yields a full video
-    # recording). Without this, cmaf/LL-HLS models record silent.
-    _audio_enabled = os.environ.get("STRMNTR_CB_AUDIO", "1") != "0"
+    # Two separate attempts at muxing CB's separate audio rendition have now
+    # been reverted after breaking recording outright on the live fleet:
+    #
+    #  1. bf0700a — local master with an EXT-X-MEDIA audio group.
+    #  2. this flag's brief default-ON — audio playlist as a SECOND ffmpeg -i.
+    #
+    # Attempt 2 passes against synthetic HLS (verified video+audio out, and
+    # graceful video-only fallback when the audio playlist has no segments),
+    # but on real Chaturbate streams every capture failed with "Output file
+    # does not exist" while StripChat recorded normally on the same run. The
+    # likely reason the '?' on -map 1:a:0? doesn't save it: '?' makes the
+    # STREAM optional, not the INPUT — if the second input itself fails to
+    # open (expired segment token, playlist momentarily empty/403), ffmpeg
+    # aborts the whole process, and CB's audio playlist carries its own
+    # short-lived token that expires independently of the video one.
+    #
+    # A silent recording beats no recording, so the default stays OFF until
+    # that is solved against a live CB stream. The dual-playlist machinery
+    # below is intact and correct for the cases it does handle — set
+    # STRMNTR_CB_AUDIO=1 to work on it, and check that CB models actually
+    # produce files (not just that a captured file has an audio stream).
+    _audio_enabled = os.environ.get("STRMNTR_CB_AUDIO") == "1"
     audio_url = None
     if getattr(pl0, "is_variant", False):
         url, _aud = _pick_video_audio(pl0, url)

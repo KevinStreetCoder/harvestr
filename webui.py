@@ -5611,6 +5611,14 @@ def api_live_bulk_add():
         return jsonify({"error": "live recording unavailable"}), 503
     body = request.get_json(force=True) or {}
     entries: list[dict] = []
+    # A bare JSON array is the obvious thing to POST here (it's what the export
+    # format itself looks like), and it used to blow up as an opaque HTTP 500
+    # on body.get() before reaching any error handling. Accept it.
+    if isinstance(body, list):
+        body = {"entries": body}
+    if not isinstance(body, dict):
+        return jsonify({"error": "expected an object with 'entries'/'text', "
+                                 "or a bare list of entries"}), 400
     # Explicit list
     if isinstance(body.get("entries"), list):
         entries.extend(body["entries"])

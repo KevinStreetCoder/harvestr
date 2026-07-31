@@ -1283,8 +1283,32 @@ class StripChat(RoomIdBot):
         stream_name = self.room_id
 
         if not stream_name:
-            self.logger.error("No room_id available - cannot build playlist URL")
-            return []
+            # A missing room_id is recoverable, not terminal: it just means
+            # resolution failed when the bot was created (network blip during a
+            # bulk add, or the model was offline then). Previously this only
+            # logged an ERROR and returned, so the model re-hit it on every
+            # poll and could NEVER record — one model produced an identical
+            # error every 60s indefinitely. Try to resolve it now.
+            try:
+                resolved = self.getRoomIdFromUsername(self.username)
+            except Exception as e:
+                resolved = None
+                self.logger.debug(f"room_id re-resolve failed: {e}")
+            if resolved:
+                self.room_id = stream_name = str(resolved)
+                self._warned_no_room_id = False
+                self.logger.info(f"Recovered missing room_id: {stream_name}")
+            else:
+                # Still nothing — say so once, then stay quiet. Repeating an
+                # unchanged fact every poll buries real failures in the feed.
+                if not getattr(self, "_warned_no_room_id", False):
+                    self._warned_no_room_id = True
+                    self.logger.warning(
+                        "No room_id and could not resolve it from the username; "
+                        "this model cannot record until it resolves")
+                else:
+                    self.logger.debug("still no room_id")
+                return []
         
         # Check if stream is origin-only (not yet replicated to edge CDN)
         # This is a temporary state - retry a few times with delay

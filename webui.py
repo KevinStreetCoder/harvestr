@@ -77,13 +77,59 @@ def _gzip_json(resp):
         pass
     return resp
 
-# ── Live recording manager (lazy – imports StreaMonitor if available) ────────
-try:
-    from live_recording import LiveManager as _LiveManager, available as _live_available
-    _live = _LiveManager(downloads_dir=DOWNLOADS_DIR)
-except Exception as _le:
-    _live = None
-    _live_available = False
+# ── Live recording manager (built in the BACKGROUND) ─────────────────────────
+#
+# This used to run inline at import time, which meant Flask didn't bind its
+# socket until LiveManager had finished restoring every tracked model. At ~1450
+# models that is around ten minutes of the web UI refusing connections outright
+# — indistinguishable from "the app is broken" — on every single restart.
+#
+# Build it on a daemon thread instead so the server answers immediately. Routes
+# already guard on `if not _live`, so the only new state is "still starting",
+# which /api/live/* reports so the UI can say so instead of showing the
+# permanent "live recording unavailable" error.
+_live = None
+_live_available = False
+_live_booting = True
+_live_boot_error = None
+_live_boot_started_at = time.time()
+
+
+def _boot_live_manager():
+    global _live, _live_available, _live_booting, _live_boot_error
+    _boot_log = logging.getLogger("webui")
+    try:
+        from live_recording import (LiveManager as _LiveManager,
+                                    available as _av, import_error as _ie)
+        _live_available = _av
+        if not _av:
+            # StreaMonitor itself failed to import — keep the reason so the UI
+            # can show something more useful than "unavailable".
+            _live_boot_error = _ie
+            return
+        _live = _LiveManager(downloads_dir=DOWNLOADS_DIR)
+    except Exception as _le:
+        _live = None
+        _live_available = False
+        _live_boot_error = f"{type(_le).__name__}: {_le}"
+        _boot_log.warning(f"[live] manager failed to start: {_live_boot_error}")
+    finally:
+        _live_booting = False
+        _boot_log.info(
+            f"[live] manager ready in {time.time() - _live_boot_started_at:.0f}s")
+
+
+threading.Thread(target=_boot_live_manager, name="live-boot", daemon=True).start()
+
+
+def _live_boot_state():
+    """Shared 'not ready yet' payload for the /api/live/* endpoints."""
+    return {
+        "available": bool(_live_available),
+        "booting": _live_booting,
+        "boot_error": _live_boot_error,
+        "boot_elapsed_s": round(time.time() - _live_boot_started_at),
+    }
 
 # ── Disk manager ─────────────────────────────────────────────────────────────
 try:
@@ -641,6 +687,8 @@ INDEX_HTML = r"""
   .status-dot.running { background: var(--good); box-shadow: 0 0 8px #4ade8080; animation: pulse 1.8s infinite; }
   .status-dot.error { background: var(--bad); }
   @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.4;} }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spin { animation: spin 1s linear infinite; transform-origin: 50% 50%; }
   .container { max-width: 1480px; margin: 0 auto; padding: 20px 24px; }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
   @media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } }
@@ -664,6 +712,20 @@ INDEX_HTML = r"""
     transition: all .15s; display: inline-flex; align-items: center; gap: 5px;
   }
   button:hover { background: #2a3248; border-color: #3d4662; }
+  /* Inline SVG icons inside buttons/badges: never let them shrink in a flex
+     row, and keep the stroke from looking heavier than the label next to it. */
+  .ic { flex: 0 0 auto; vertical-align: -.125em; }
+  button .ic { opacity: .85; }
+  button:hover .ic { opacity: 1; }
+  button:disabled .ic { opacity: .5; }
+  /* "Currently downloading" — a disabled button alone reads as "unavailable",
+     which is indistinguishable from "busy". This says which one it is. */
+  button.is-active { opacity: 1 !important; cursor: default; }
+  button.primary.is-active {
+    background: linear-gradient(180deg, #2f6ea8, #24507e);
+    border-color: #4c9bf5;
+  }
+  button.is-active .ic { opacity: 1; animation: pulse 1.6s ease-in-out infinite; }
   button.primary { background: linear-gradient(180deg, #3b8ce6, #2a6cb3);
                    border-color: #3b8ce6; color: white; font-weight: 600; }
   button.primary:hover { background: linear-gradient(180deg, #4c9bf5, #3478c0); }
@@ -1670,21 +1732,40 @@ INDEX_HTML = r"""
 
   <div id="archive-controls" style="display:flex; gap:8px;">
     <button class="primary" id="start-btn" onclick="startDownload()"
-            data-tip="Run every performer in config">▶&nbsp; Start all</button>
+            data-tip="Run every performer in config">
+      <svg class="ic" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+      <span id="start-btn-label">Start all</span>
+    </button>
     <button class="danger" id="stop-btn" onclick="stopDownload()" disabled
-            data-tip="Kill the running subprocess">■&nbsp; Stop</button>
-    <button onclick="runDedup()" data-tip="Scan + delete duplicate files">⌥&nbsp; Dedup</button>
+            data-tip="Kill the running subprocess">
+      <svg class="ic" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+      Stop
+    </button>
+    <button onclick="runDedup()" data-tip="Scan + delete duplicate files">
+      <svg class="ic" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      Dedup
+    </button>
     <button class="ghost" onclick="refreshAll()" aria-label="Refresh"
-            data-tip="Reload config / sites / history">↻</button>
+            data-tip="Reload config / sites / history">
+      <svg class="ic" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+    </button>
   </div>
   <div id="live-controls" style="display:none; gap:8px;">
-    <button class="success" onclick="liveToggleAll(true)" data-tip="Start polling every model">▶ Start all live</button>
-    <button class="danger" onclick="liveToggleAll(false)" data-tip="Stop polling every model">■ Stop all</button>
+    <button class="success" onclick="liveToggleAll(true)" data-tip="Start polling every model">
+      <svg class="ic" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+      Start all live
+    </button>
+    <button class="danger" onclick="liveToggleAll(false)" data-tip="Stop polling every model">
+      <svg class="ic" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+      Stop all
+    </button>
     <button class="ghost" onclick="liveRepairAll()" data-tip="Check + repair every recording across all models">
       <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
       Repair all
     </button>
-    <button class="ghost" onclick="liveRefresh()" aria-label="Refresh">↻</button>
+    <button class="ghost" onclick="liveRefresh()" aria-label="Refresh">
+      <svg class="ic" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+    </button>
   </div>
 </header>
 
@@ -1966,6 +2047,21 @@ INDEX_HTML = r"""
 </section><!-- /page-archive -->
 
 <section id="page-live" class="page" role="tabpanel" aria-labelledby="tab-live" hidden>
+  <!-- Shown while the Live manager restores the tracked fleet. At ~1450 models
+       that takes minutes, and it is NOT an error — the old UI showed the
+       failure card below for the whole window. -->
+  <div id="live-booting" class="card" style="display:none;">
+    <h2>
+      <svg class="icon spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+      Starting Live recorder
+    </h2>
+    <p class="muted" style="font-size:13px;">
+      Restoring tracked models and reconnecting to each site. Recording starts
+      automatically as models come online — you can leave this page.
+    </p>
+    <p id="live-boot-elapsed" class="muted" style="font-size:12px;"></p>
+  </div>
+
   <div id="live-unavailable" class="card" style="display:none;">
     <h2>
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
@@ -2369,6 +2465,38 @@ function toast(msg, type = '') {
     setTimeout(() => item.remove(), 300);
   }, 3500);
 }
+// ── Icons ────────────────────────────────────────────────────────────────
+// One inline-SVG set for the whole UI. Previously about half the controls
+// used unicode glyphs as icons (▶ ■ ↻ ⌥ ✕ ↗ 👁 🛰 📋 ⬇ ⏳ ⚠). Those render at
+// a different weight, size and baseline than the SVG icons next to them, and
+// on Windows several fall back to the emoji font and turn up multicoloured —
+// so the toolbar never looked like one set. These are stroke-based on
+// currentColor, so they inherit button colour and disabled state for free.
+const ICONS = {
+  play:    '<polygon points="6 3 20 12 6 21 6 3"/>',
+  stop:    '<rect x="5" y="5" width="14" height="14" rx="2"/>',
+  refresh: '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
+  dedup:   '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  close:   '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
+  external:'<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>',
+  eye:     '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
+  satellite:'<circle cx="12" cy="12" r="3"/><path d="M12 2a10 10 0 0 1 10 10M12 6a6 6 0 0 1 6 6"/><path d="M4.9 19.1 9 15M2 22l3-3"/>',
+  list:    '<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>',
+  download:'<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
+  check:   '<polyline points="20 6 9 17 4 12"/>',
+  clock:   '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  alert:   '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
+  x:       '<circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>',
+};
+// size: px. Inline-block so it sits on the text baseline inside buttons.
+function ico(name, size = 14, extra = '') {
+  const body = ICONS[name];
+  if (!body) return '';
+  return `<svg class="ic" viewBox="0 0 24 24" width="${size}" height="${size}" fill="none"`
+    + ` stroke="currentColor" stroke-width="2" stroke-linecap="round"`
+    + ` stroke-linejoin="round" aria-hidden="true" ${extra}>${body}</svg>`;
+}
+
 function escapeHtml(s) {
   return (s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -2425,16 +2553,19 @@ async function refreshStatus() {
     const dot = document.getElementById('status-dot');
     const txt = document.getElementById('status-text');
 
-    // Build a compact activity label. Priorities:
-    //   1. Live recording (most real-time thing happening)
-    //   2. Archive downloading
-    //   3. Both → show both
-    //   4. Neither → idle
+    // Build a compact activity label.
+    //
+    // Deliberately does NOT repeat the recording count — that number already
+    // sits in the "Live" tab badge a few pixels away, and showing "58" twice
+    // in one header reads as a bug. This pill answers "what is it doing and
+    // how fast", the badge answers "how many". Different questions.
     const bits = [];
     if (s.live_recording > 0) {
-      bits.push(`<span style="color:var(--good);">● ${s.live_recording} live</span>`);
+      const bps = window._liveWriteBps || 0;
+      bits.push(`<span style="color:var(--good);">recording</span>`
+        + (bps > 0 ? ` <span class="muted">${bytesHuman(bps)}/s</span>` : ''));
     } else if (s.live_running > 0) {
-      bits.push(`${s.live_running} polling`);
+      bits.push(`<span class="muted">${s.live_running.toLocaleString()} armed</span>`);
     }
     if (s.archive_running) {
       const p = s.archive_progress || {};
@@ -2452,9 +2583,25 @@ async function refreshStatus() {
       dot.className = 'status-dot';
       txt.textContent = 'idle';
     }
-    // Start button enabled only when NO archive job is running anywhere
-    document.getElementById('start-btn').disabled = s.archive_running || s.running;
-    document.getElementById('stop-btn').disabled = !(s.archive_running || s.running);
+    // Start button enabled only when NO archive job is running anywhere.
+    // Also SAY so: a greyed-out button alone doesn't distinguish "downloading
+    // right now" from "unavailable", which is the whole question the user is
+    // asking when they look at this control. Swap the label and pulse it.
+    const startBtn = document.getElementById('start-btn');
+    const startLbl = document.getElementById('start-btn-label');
+    const archiveBusy = !!(s.archive_running || s.running);
+    startBtn.disabled = archiveBusy;
+    document.getElementById('stop-btn').disabled = !archiveBusy;
+    startBtn.classList.toggle('is-active', archiveBusy);
+    if (startLbl) {
+      const p = s.archive_progress || {};
+      startLbl.textContent = archiveBusy
+        ? (p.total ? `Downloading ${p.done}/${p.total}` : 'Downloading…')
+        : 'Start all';
+    }
+    startBtn.setAttribute('data-tip', archiveBusy
+      ? `Downloading${s.current_performer ? ' ' + s.current_performer : ''} — use Stop to cancel`
+      : 'Run every performer in config');
 
     // Live log
     const lv = document.getElementById('log-viewer');
@@ -2497,7 +2644,8 @@ async function refreshProgress() {
 
     // Phase / activity summary
     const phase = sess.phase || '';
-    const phaseIcon = {probing:'🛰', enumerating:'📋', downloading:'⬇', done:'✔'}[phase] || '⏳';
+    const phaseIcon = ico({probing: 'satellite', enumerating: 'list',
+                           downloading: 'download', done: 'check'}[phase] || 'clock', 13);
     let phaseHtml = '';
     if (phase === 'probing' && sess.probe_total) {
       const pct = Math.min(100, Math.floor(100 * (sess.probe_done||0) / sess.probe_total));
@@ -3117,8 +3265,8 @@ function renderAuth() {
                     signup:'https://recu.me/account/signup',
                     paid:'https://recu.me/account/subscribe',
                     howto:`<ol>
-  <li>Sign up at <a href="https://recu.me/account/signup" target="_blank">recu.me/account/signup</a> (free, email only).</li>
-  <li><b>For unlimited access</b>, buy a premium plan at <a href="https://recu.me/account/subscribe" target="_blank">recu.me/account/subscribe</a> ($10-$20/month).</li>
+  <li>Sign up at <a href="https://recu.me/account/signup" target="_blank" rel="noopener noreferrer">recu.me/account/signup</a> (free, email only).</li>
+  <li><b>For unlimited access</b>, buy a premium plan at <a href="https://recu.me/account/subscribe" target="_blank" rel="noopener noreferrer">recu.me/account/subscribe</a> ($10-$20/month).</li>
   <li>Log into recu.me in Chrome/Firefox.</li>
   <li>Install the "Get cookies.txt LOCALLY" extension, click it → Export.</li>
   <li>Save the file somewhere (e.g. <code>C:\\Users\\&lt;you&gt;\\harvestr\\cookies.txt</code>).</li>
@@ -3130,7 +3278,7 @@ function renderAuth() {
                     signup:'https://x.com/i/flow/signup',
                     paid:'https://x.com/i/premium_sign_up',
                     howto:`<ol>
-  <li>Log in at <a href="https://x.com" target="_blank">x.com</a> with your <b>premium</b> account (free works too but with much stricter limits).</li>
+  <li>Log in at <a href="https://x.com" target="_blank" rel="noopener noreferrer">x.com</a> with your <b>premium</b> account (free works too but with much stricter limits).</li>
   <li>Export cookies using "Get cookies.txt LOCALLY" extension.</li>
   <li>Append the exported file to your existing cookies.txt (or use a separate one).</li>
   <li>In Settings, point <b>Cookies file</b> at the path.</li>
@@ -3140,7 +3288,7 @@ function renderAuth() {
                     why:'Public videos work without auth. Private/friend-locked uploads require you to be a "friend" of the uploader.',
                     signup:'https://www.camwhores.tv/signup/',
                     howto:`<ol>
-  <li>Create account at <a href="https://www.camwhores.tv/signup/" target="_blank">camwhores.tv</a>.</li>
+  <li>Create account at <a href="https://www.camwhores.tv/signup/" target="_blank" rel="noopener noreferrer">camwhores.tv</a>.</li>
   <li>Upload at least 1 video yourself to become a "member" (required to request friends).</li>
   <li>Add the uploader as a friend (they must accept).</li>
   <li>Log in, export cookies, add to <b>Cookies file</b>.</li>
@@ -3154,7 +3302,7 @@ function renderAuth() {
                     why:'Video pages return 404 without a logged-in session. Free account works (no premium tier needed). Harvestr logs in automatically for you when you supply username + password in Settings above.',
                     signup:'https://camsmut.com/register',
                     howto:`<ol>
-  <li>Create a free account at <a href="https://camsmut.com/register" target="_blank">camsmut.com/register</a>.</li>
+  <li>Create a free account at <a href="https://camsmut.com/register" target="_blank" rel="noopener noreferrer">camsmut.com/register</a>.</li>
   <li>Come back here → <b>Settings</b> (above) → fill <b>CamSmut user</b> and <b>CamSmut password</b>.</li>
   <li>Click <b>Save settings</b>. Harvestr will auto-login on the next scrape.</li>
 </ol>
@@ -3171,8 +3319,8 @@ function renderAuth() {
     return `<div class="auth-site">
       <div class="header">
         <span class="title">${escapeHtml(meta.label || rep.label)}</span>
-        ${meta.paid ? `<a href="${meta.paid}" target="_blank" class="pill info">Buy premium ↗</a>` : ''}
-        ${meta.signup ? `<a href="${meta.signup}" target="_blank" class="pill">Free signup ↗</a>` : ''}
+        ${meta.paid ? `<a href="${meta.paid}" target="_blank" rel="noopener noreferrer" class="pill info">Buy premium ${ico('external', 10)}</a>` : ''}
+        ${meta.signup ? `<a href="${meta.signup}" target="_blank" rel="noopener noreferrer" class="pill">Free signup ${ico('external', 10)}</a>` : ''}
         <span class="status ${rep.status}">${statusLabel}</span>
       </div>
       <div class="why">${escapeHtml(meta.why || '')}</div>
@@ -3488,12 +3636,23 @@ async function liveRefresh() {
   console.debug('[live] status: total=' + (_liveSnapshot.summary?.total ?? 0)
                 + ' running=' + (_liveSnapshot.summary?.running ?? 0)
                 + ' recording=' + (_liveSnapshot.summary?.recording ?? 0));
-  const avail = !!_liveSnapshot.available;
+  // Three states, not two: ready / still starting / genuinely broken.
+  const booting = !!_liveSnapshot.booting;
+  const avail = !!_liveSnapshot.available && !booting;
   document.getElementById('live-available').style.display = avail ? '' : 'none';
-  document.getElementById('live-unavailable').style.display = avail ? 'none' : '';
+  document.getElementById('live-booting').style.display = booting ? '' : 'none';
+  document.getElementById('live-unavailable').style.display =
+    (!avail && !booting) ? '' : 'none';
+  if (booting) {
+    const el = document.getElementById('live-boot-elapsed');
+    const secs = _liveSnapshot.boot_elapsed_s || 0;
+    if (el) el.textContent = secs ? `Starting for ${durHuman(secs)}…` : '';
+    return;
+  }
   if (!avail) {
     document.getElementById('live-error').textContent =
-      _liveSnapshot.import_error ? 'Error: ' + _liveSnapshot.import_error : '';
+      (_liveSnapshot.boot_error || _liveSnapshot.import_error)
+        ? 'Error: ' + (_liveSnapshot.boot_error || _liveSnapshot.import_error) : '';
     return;
   }
   _liveApplyStats(_liveSnapshot.summary || {});
@@ -3681,6 +3840,9 @@ async function liveSummaryRefresh() {
     const data = await r.json();
     if (!data || data.available === false) return;
     const s = data.summary || {};
+    // Share the write rate with the header status pill, which polls a
+    // different endpoint (/api/status) that has no throughput field.
+    window._liveWriteBps = s.download_bps_avg || 0;
     _liveApplyStats(s);
     // VPN exit panel: poll its own endpoint at most every 30s (external IP lookup).
     if (Date.now() - (window._lastVpnPoll || 0) > 30000) { window._lastVpnPoll = Date.now(); pollVpnStatus(); }
@@ -3763,7 +3925,7 @@ function renderLiveModels() {
     if (m.age) badges.push(`<span class="badge age" data-tip="Age">${m.age}</span>`);
     if (m.language) badges.push(`<span class="badge language">${escapeHtml(m.language)}</span>`);
     if (m.spectators != null && m.status === 'PUBLIC')
-      badges.push(`<span class="badge viewers" data-tip="Viewers now">👁 ${numHuman(m.spectators)}</span>`);
+      badges.push(`<span class="badge viewers" data-tip="Viewers now">${ico('eye', 11)} ${numHuman(m.spectators)}</span>`);
     if (m.stream_duration_s && m.status === 'PUBLIC')
       badges.push(`<span class="badge duration" data-tip="Streaming for">${secsHuman(m.stream_duration_s)}</span>`);
     const badgesHtml = badges.length
@@ -5526,7 +5688,7 @@ def api_disk_enforce_cap():
 def api_live_sites():
     """Supported cam sites from StreaMonitor."""
     if not _live:
-        return jsonify({"available": False, "sites": []})
+        return jsonify({**_live_boot_state(), "sites": []})
     return jsonify({"available": _live_available, "sites": _live.list_sites()})
 
 
@@ -5586,7 +5748,10 @@ def _live_snapshot_cached():
 def api_live_status():
     """Snapshot of every live model and its current state (cached ~1.5 s)."""
     if not _live:
-        return jsonify({"available": False, "models": [], "summary": {}})
+        # Distinguish "still starting" from "not installed" — during the boot
+        # window the fleet is restoring, and reporting available:false made the
+        # UI show a hard error for something that fixes itself.
+        return jsonify({**_live_boot_state(), "models": [], "summary": {}})
     return jsonify(_live_snapshot_cached())
 
 
@@ -5596,7 +5761,7 @@ def api_live_summary():
     list and no per-model metadata rebuild. Lets the header poll fast + cheap
     without the full ~660 KB snapshot."""
     if not _live:
-        return jsonify({"available": False, "summary": {}})
+        return jsonify({**_live_boot_state(), "summary": {}})
     return jsonify({"available": True, "summary": _live.live_summary()})
 
 

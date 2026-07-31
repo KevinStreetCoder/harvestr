@@ -26,6 +26,39 @@ class Cam4(Bot):
             return None
         return self.getWantedResolutionPlaylist(self.lastInfo['cdnURL'])
 
+    # Consecutive blocked responses; only the first is worth a WARNING.
+    _consec_block = 0
+
+    def _blockedStatus(self, code: int, what: str) -> Status:
+        """Map a non-OK Cam4 HTTP status to a bot Status that actually backs off.
+
+        This used to return Status.UNKNOWN and log a WARNING every poll. UNKNOWN
+        gets no backoff, so a persistently 403-ing model re-polled on every
+        cycle forever — 25 identical "Stream info check failed with HTTP 403"
+        lines dominated the dashboard's event feed and buried real failures.
+
+        403/429 from Cam4 is an exit-IP reputation block, not a per-model
+        problem, so RATELIMIT is the right state: it backs off (sleep_on_ratelimit,
+        exponential) AND reports to the VPN auto-rotator, which is exactly the
+        signal rotation exists to act on.
+        """
+        self._consec_block += 1
+        if code in (403, 429):
+            # First one is worth seeing; the rest are the same fact repeated.
+            if self._consec_block == 1:
+                self.logger.warning(
+                    f"{what} blocked (HTTP {code}) — backing off and flagging "
+                    f"the exit IP for rotation")
+            else:
+                self.logger.debug(f"{what} still blocked (HTTP {code}) "
+                                  f"x{self._consec_block}")
+            return Status.RATELIMIT
+        if code >= 500:
+            self.logger.debug(f"{what} server error (HTTP {code})")
+            return Status.UNKNOWN
+        self.logger.debug(f"{what} failed with HTTP {code}")
+        return Status.UNKNOWN
+
     def getStatus(self) -> Status:
         """Check the current status of the stream."""
         try:
@@ -68,8 +101,8 @@ class Cam4(Bot):
                 )
                 
                 if access_response.status_code != 200:
-                    self.logger.warning(f"Access check failed with HTTP {access_response.status_code}")
-                    return Status.UNKNOWN
+                    return self._blockedStatus(access_response.status_code,
+                                               "Access check")
                     
                 access_data = access_response.json()
                 if access_data.get('privateStream', False):
@@ -92,10 +125,11 @@ class Cam4(Bot):
                     return Status.OFFLINE
                 elif stream_response.status_code == 200:
                     self.lastInfo = stream_response.json()
+                    self._consec_block = 0
                     return Status.PUBLIC
                 else:
-                    self.logger.warning(f"Stream info check failed with HTTP {stream_response.status_code}")
-                    return Status.UNKNOWN
+                    return self._blockedStatus(stream_response.status_code,
+                                               "Stream info check")
                     
             except Exception as e:
                 self.logger.error(f"Error getting stream info: {e}")

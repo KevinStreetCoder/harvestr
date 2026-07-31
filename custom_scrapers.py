@@ -1827,17 +1827,46 @@ class XCom(SiteScraper):
     QID_USER_BY_NAME = ["ck5KkZ8t5cOmoLssopN99Q", "1VOOyvKkiI3FMmkeDNxM9A"]
     QID_USER_MEDIA = ["jCRhbOzdgOHp6u9H4g2tEg", "vFPc2LVIu7so2uA_gHQAdg"]
 
+    @staticmethod
+    def _stored_creds() -> dict:
+        """X credentials from the machine-local secret store, if any.
+
+        Lets a user authenticate without exporting browser cookies. Kept out of
+        config.json deliberately — see secret_store's module docstring.
+        """
+        try:
+            import secret_store
+            return secret_store.get_all("x")
+        except Exception:
+            return {}
+
+    def _cookie_creds(self) -> dict:
+        """auth_token / ct0 pulled from the loaded cookie jar."""
+        out = {}
+        for c in (self._cookie_jar or []):
+            if "x.com" in c.domain or "twitter.com" in c.domain:
+                if c.name in ("auth_token", "ct0"):
+                    out[c.name] = c.value
+        return out
+
+    def _creds(self) -> dict:
+        """Effective credentials: cookie jar first, secret store as fallback."""
+        creds = dict(self._stored_creds())
+        creds.update({k: v for k, v in self._cookie_creds().items() if v})
+        return creds
+
     def _make_session(self) -> requests.Session:
         s = super()._make_session()
-        ct0 = ""
-        if self._cookie_jar:
-            for c in self._cookie_jar:
-                if "x.com" in c.domain or "twitter.com" in c.domain:
-                    if c.name == "ct0":
-                        ct0 = c.value
-                        break
+        creds = self._creds()
+        ct0 = creds.get("ct0", "")
+        auth_token = creds.get("auth_token", "")
+        # A user-supplied bearer (X API credential) overrides the public web
+        # bearer; the web one is a well-known constant, not a secret.
+        bearer = creds.get("bearer") or self.BEARER
+        if bearer and not bearer.lower().startswith("bearer "):
+            bearer = f"Bearer {bearer}"
         s.headers.update({
-            "authorization": self.BEARER,
+            "authorization": bearer,
             "x-csrf-token": ct0,
             "x-twitter-auth-type": "OAuth2Session" if ct0 else "",
             "x-twitter-active-user": "yes",
@@ -1847,13 +1876,30 @@ class XCom(SiteScraper):
         })
         if not ct0:
             del s.headers["x-twitter-auth-type"]
+        # auth_token from the secret store won't be in the cookie jar, so set
+        # it on the session explicitly.
+        if auth_token and not self._cookie_creds().get("auth_token"):
+            s.cookies.set("auth_token", auth_token, domain=".x.com")
+            if ct0:
+                s.cookies.set("ct0", ct0, domain=".x.com")
         return s
 
     def _check_auth(self) -> bool:
-        if not self._cookie_jar:
-            return False
-        names = {c.name for c in self._cookie_jar if ("x.com" in c.domain or "twitter.com" in c.domain)}
-        return "auth_token" in names and "ct0" in names
+        creds = self._creds()
+        return bool(creds.get("auth_token") and creds.get("ct0"))
+
+    def auth_hint(self) -> str:
+        """Why X was skipped, in words the user can act on. Never echoes a
+        credential value."""
+        creds = self._creds()
+        have = [k for k in ("auth_token", "ct0") if creds.get(k)]
+        if len(have) == 2:
+            return ""
+        missing = [k for k in ("auth_token", "ct0") if not creds.get(k)]
+        return (f"X needs a logged-in session (missing: {', '.join(missing)}). "
+                f"Add an x.com cookies.txt, or store credentials with "
+                f"secret_store (HARVESTR_X_AUTH_TOKEN / HARVESTR_X_CT0). "
+                f"X only serves adult posts to logged-in sessions.")
 
     def _gql_get(self, qid_list: List[str], op_name: str, variables: dict,
                  features: Optional[dict] = None) -> Optional[dict]:
@@ -1912,7 +1958,13 @@ class XCom(SiteScraper):
 
     def probe(self, username: str) -> Optional[ProbeHit]:
         if not self._check_auth():
-            self.log.debug(f"  [{self.NAME}] no auth cookies — skipping")
+            # WARNING, not debug: with no credentials this scraper returns
+            # nothing for every username, and at debug level the user just saw
+            # "no results from X" with no way to know auth was the reason.
+            # Once per run is enough — it's a config fact, not a per-user one.
+            if not getattr(XCom, "_warned_no_auth", False):
+                XCom._warned_no_auth = True
+                self.log.warning(f"  [{self.NAME}] {self.auth_hint()}")
             return None
         data = self._gql_get(
             self.QID_USER_BY_NAME, "UserByScreenName",

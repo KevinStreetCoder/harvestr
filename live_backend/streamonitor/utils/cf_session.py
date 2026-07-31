@@ -329,11 +329,58 @@ async def _perform_with_retries(hs: _HostState, method: str, url: str, **kwargs)
     
     # Exhausted retries
     if hs.logger:
-        hs.logger.error(
-            f"{hs.bot_id} [{hs.domain}/{hs.profile}] "
-            f"Failed after 5 attempts: {type(last_exc).__name__}"
-        )
+        _log_exhausted(hs, last_exc)
     raise last_exc
+
+
+# Repeated retry-exhaustion is one FACT (this endpoint is unreachable), not N
+# events. A single model whose CDN host was timing out produced 30 of the 53
+# errors in one session — enough to bury every other failure in the dashboard's
+# event feed. Log the first at ERROR, then stay quiet and re-state periodically
+# with a count, so a persistent problem is still visible but not deafening.
+_EXHAUST_RESTATE_SEC = 300.0
+# key -> [suppressed_since_last_log, last_logged_monotonic]
+_exhausted: Dict[str, list] = {}
+_exhausted_lock = threading.Lock()
+
+
+def _log_exhausted(hs, last_exc) -> None:
+    key = f"{hs.bot_id}|{hs.domain}"
+    now = time.monotonic()
+    with _exhausted_lock:
+        entry = _exhausted.get(key)
+        if entry is None:
+            _exhausted[key] = [0, now]
+            first, suppressed = True, 0
+        elif now - entry[1] >= _EXHAUST_RESTATE_SEC:
+            # Count only the ones actually swallowed; this call is being
+            # reported, so it isn't one of them.
+            first, suppressed = False, entry[0]
+            entry[0], entry[1] = 0, now
+        else:
+            entry[0] += 1
+            first, suppressed = None, 0
+
+    label = f"{hs.bot_id} [{hs.domain}/{hs.profile}]"
+    reason = type(last_exc).__name__
+    if first is True:
+        hs.logger.error(f"{label} Failed after 5 attempts: {reason}")
+    elif first is False:
+        hs.logger.error(
+            f"{label} still failing: {reason} "
+            f"({suppressed} more in the last {int(_EXHAUST_RESTATE_SEC // 60)}m)")
+    else:
+        hs.logger.debug(f"{label} Failed after 5 attempts: {reason}")
+
+
+def reset_exhausted(bot_id: str = "") -> None:
+    """Clear suppression state (all, or one bot) after a successful request."""
+    with _exhausted_lock:
+        if not bot_id:
+            _exhausted.clear()
+        else:
+            for k in [k for k in _exhausted if k.startswith(f"{bot_id}|")]:
+                _exhausted.pop(k, None)
 
 
 # ---------- Session Manager ----------

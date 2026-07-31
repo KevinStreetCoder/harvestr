@@ -48,6 +48,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Optional, List, Dict, Any, Iterable
 
 if sys.platform == "win32":
@@ -779,12 +780,16 @@ class YtdlpEngine:
         return opts
 
     def download(self, video: VideoRef, output_dir: Path,
-                 progress_hook=None) -> Optional[dict]:
+                 progress_hook=None, extra_opts: Optional[dict] = None) -> Optional[dict]:
         """Download one video. Returns info_dict on success, None on failure.
 
         Optional `progress_hook` is passed through to yt-dlp's `progress_hooks`
-        so the caller can surface byte/speed/ETA updates (UI progress bar)."""
+        so the caller can surface byte/speed/ETA updates (UI progress bar).
+        `extra_opts` merges in per-URL options such as a host-specific
+        cookiefile."""
         opts = self._download_opts(video.performer, output_dir)
+        if extra_opts:
+            opts.update(extra_opts)
         if progress_hook is not None:
             opts["progress_hooks"] = [progress_hook]
         try:
@@ -1769,6 +1774,232 @@ class UniversalDownloader:
         return stats
 
     # ── High-level orchestration ─────────────────────────────────────────────
+    # Anything with a scheme, or a bare host/path that resolves to a known
+    # video page. Kept deliberately tight: a performer name must never be
+    # mistaken for a URL, since that would skip the whole probe phase.
+    _URL_RE = re.compile(r"^(?:https?://|www\.)\S+$", re.I)
+
+    @classmethod
+    def looks_like_url(cls, s: str) -> bool:
+        s = (s or "").strip()
+        if not s or " " in s:
+            return False
+        if cls._URL_RE.match(s):
+            return True
+        # bare "x.com/user/status/123" — a host with a dot and a path
+        return bool(re.match(r"^[\w.-]+\.[a-z]{2,}/\S+$", s, re.I))
+
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        url = url.strip()
+        if not url.lower().startswith(("http://", "https://")):
+            url = "https://" + url.lstrip("/")
+        return url
+
+    _x_cookiefile_cache: Optional[str] = None
+
+    def _x_cookiefile(self) -> str:
+        """Netscape cookies.txt synthesised from stored X credentials.
+
+        yt-dlp authenticates via a cookie file; the secret store holds the raw
+        auth_token/ct0. Bridging them here means a user who pasted credentials
+        into the secret store gets working X downloads without also having to
+        export a cookies.txt by hand. Written to a private temp file, never
+        into the project directory.
+        """
+        if self._x_cookiefile_cache:
+            return self._x_cookiefile_cache
+        try:
+            import secret_store
+            creds = secret_store.get_all("x")
+        except Exception:
+            return ""
+        if not (creds.get("auth_token") and creds.get("ct0")):
+            return ""
+        import tempfile
+        fd, path = tempfile.mkstemp(prefix="harvestr_x_", suffix=".txt")
+        expiry = int(time.time()) + 86400 * 365
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("# Netscape HTTP Cookie File\n")
+            for name in ("auth_token", "ct0"):
+                f.write(f".x.com\tTRUE\t/\tTRUE\t{expiry}\t{name}\t{creds[name]}\n")
+                f.write(f".twitter.com\tTRUE\t/\tTRUE\t{expiry}\t{name}\t{creds[name]}\n")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        self._x_cookiefile_cache = path
+        self.log.debug("using stored X credentials for yt-dlp")
+        return path
+
+    def _opts_for_url(self, url: str, opts: dict) -> dict:
+        """Add per-host auth that isn't already configured globally."""
+        host = ""
+        try:
+            host = urlparse(self._normalize_url(url)).netloc.lower()
+        except Exception:
+            pass
+        if ("x.com" in host or "twitter.com" in host) and not opts.get("cookiefile") \
+                and not opts.get("cookiesfrombrowser"):
+            cf = self._x_cookiefile()
+            if cf:
+                opts["cookiefile"] = cf
+        return opts
+
+    def _probe_url_verbose(self, url: str) -> tuple:
+        """Probe a single URL, keeping yt-dlp's error text.
+
+        engine.probe() swallows the exception and returns None, which is right
+        for a 50-site fan-out (most probes are expected 404s) but useless for a
+        link the user deliberately pasted — there, WHY it failed is the whole
+        answer.
+        """
+        opts = self.engine._common_opts()
+        opts.update({"skip_download": True, "noplaylist": False,
+                     "retries": 1, "extractor_retries": 1, "socket_timeout": 30})
+        opts = self._opts_for_url(url, opts)
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                return (ydl.sanitize_info(info) if info else None), ""
+        except yt_dlp.utils.DownloadError as e:
+            return None, str(e)
+        except Exception as e:
+            return None, f"{type(e).__name__}: {e}"
+
+    def _explain_url_failure(self, url: str, err: str) -> List[str]:
+        """Turn a yt-dlp error into something the user can act on."""
+        low = (err or "").lower()
+        host = ""
+        try:
+            host = urlparse(self._normalize_url(url)).netloc.lower()
+        except Exception:
+            pass
+        out = [f"Could not download {url}"]
+
+        auth_needed = any(k in low for k in (
+            "nsfw tweet requires authentication", "requires authentication",
+            "log in", "login required", "private", "sign in",
+            "account is required", "members-only", "subscribe"))
+        have_cookies = bool(self.config.cookies_file
+                            or self.config.cookies_from_browser)
+
+        if auth_needed and not have_cookies:
+            out.append("  This post needs a logged-in session and no cookies "
+                       "are configured.")
+            if "x.com" in host or "twitter.com" in host:
+                # The common case for this tool: X gates all adult content
+                # behind login, so guest access only ever sees SFW posts.
+                out.append("  X serves adult/NSFW posts to logged-in sessions "
+                           "only — a guest session can't see them.")
+            out.append("  Fix: set 'Cookies file' to a Netscape cookies.txt in "
+                       "Settings, or set 'cookies_from_browser' to e.g. "
+                       "chrome / firefox / edge to reuse a browser login.")
+        elif auth_needed:
+            out.append("  Login required, and the configured cookies were "
+                       "rejected — they may be expired. Re-export them.")
+        elif "unsupported url" in low:
+            out.append("  No extractor handles this site. If it's a video "
+                       "page, try the direct media URL.")
+        elif "no video could be found" in low:
+            out.append("  The page loaded but has no video attached.")
+        elif any(k in low for k in ("404", "not found", "does not exist",
+                                    "unavailable", "deleted")):
+            out.append("  The post no longer exists or was removed.")
+        elif err:
+            out.append(f"  {err.strip().splitlines()[-1][:220]}")
+        return out
+
+    def run_url(self, raw_url: str, dry_run: bool = False) -> dict:
+        """Download a single video from a direct link.
+
+        The probe/enumerate pipeline is username-shaped: it fans out to 50+
+        sites looking for a profile. Handing it a URL would search every site
+        for a "performer" literally named "https://x.com/...". A link is a
+        different job — resolve it with yt-dlp and pull just that video.
+        """
+        url = self._normalize_url(raw_url)
+        summary = {"performer": url, "hits": 1, "new_videos": 0,
+                   "downloaded": 0, "failed": 0, "url_mode": True}
+        self.progress.session_start(url, total_queued=1)
+        try:
+            # Probe first so the file is filed under the real uploader rather
+            # than a folder named after the URL.
+            info, err = self._probe_url_verbose(url)
+            if not info:
+                for line in self._explain_url_failure(url, err):
+                    self.log.error(line)
+                summary["failed"] = 1
+                summary["error"] = err or "unreadable"
+                return summary
+
+            uploader = str(info.get("uploader_id") or info.get("uploader")
+                           or info.get("channel") or "unknown").lstrip("@")
+            title = str(info.get("title") or info.get("id") or "video")
+            extractor = str(info.get("extractor_key")
+                            or info.get("extractor") or "link")
+            entries = info.get("entries")
+            self.log.info(f"  {extractor}: {uploader} — {title[:70]}")
+
+            if dry_run:
+                n = len(entries) if isinstance(entries, list) else 1
+                self.log.info(f"  [dry-run] would download {n} video(s)")
+                summary["new_videos"] = n
+                return summary
+
+            video = VideoRef(
+                site=extractor.lower(),
+                video_id=str(info.get("id") or ""),
+                video_url=url,
+                title=title,
+                performer=uploader,
+            )
+            if self.history.is_downloaded(uploader, video.global_id):
+                self.log.info("  already downloaded — skipping")
+                return summary
+
+            summary["new_videos"] = 1
+            slot = self.progress.start_video(
+                site=video.site, video_id=video.video_id,
+                title=video.title or video.video_id, backend="yt-dlp",
+                video_url=url,
+            )
+            got = None
+            try:
+                got = self.engine.download(
+                    video, self.output_dir,
+                    progress_hook=make_yt_dlp_hook(self.progress, slot),
+                    extra_opts=self._opts_for_url(url, {}))
+            finally:
+                self.progress.finish_video(slot, status="ok" if got else "failed")
+            if got:
+                summary["downloaded"] = 1
+                # Record the real file, not just the id — an empty path/size in
+                # history makes the Archive tab show a 0 B entry and breaks
+                # dedup's "do I already have this" size check.
+                out_path = (got.get("filepath")
+                            or (got.get("requested_downloads") or [{}])[0].get("filepath")
+                            or got.get("_filename") or "")
+                size = 0
+                try:
+                    if out_path and os.path.exists(out_path):
+                        size = os.path.getsize(out_path)
+                except OSError:
+                    pass
+                self.history.mark_downloaded(video, output_path=str(out_path),
+                                             filesize=size)
+                summary["bytes"] = size
+                self.log.info(f"  downloaded: {title[:70]}"
+                              + (f" ({size / 1048576:.1f} MB)" if size else ""))
+            else:
+                summary["failed"] = 1
+        except Exception as e:
+            self.log.error(f"  {url}: {type(e).__name__}: {e}")
+            summary["failed"] = 1
+        finally:
+            self.progress.session_end()
+        return summary
+
     def run_performer(self, performer: str, dry_run: bool = False) -> dict:
         summary = {"performer": performer, "hits": 0, "new_videos": 0, "downloaded": 0, "failed": 0}
 
@@ -1922,7 +2153,10 @@ class UniversalDownloader:
             return
         totals = {"performers": 0, "hits": 0, "new_videos": 0, "downloaded": 0, "failed": 0}
         for p in self.config.performers:
-            s = self.run_performer(p, dry_run=dry_run)
+            # The performers list may hold pasted links alongside usernames.
+            s = (self.run_url(p, dry_run=dry_run)
+                 if self.looks_like_url(p)
+                 else self.run_performer(p, dry_run=dry_run))
             totals["performers"] += 1
             for k in ("hits", "new_videos", "downloaded", "failed"):
                 totals[k] += s.get(k, 0)
@@ -2028,7 +2262,12 @@ def main() -> int:
     if args.all:
         dl.run_all(dry_run=args.dry_run)
     elif args.performer:
-        dl.run_performer(args.performer, dry_run=args.dry_run)
+        # One positional arg, two meanings. A link goes straight to yt-dlp;
+        # a bare name fans out across every configured site.
+        if UniversalDownloader.looks_like_url(args.performer):
+            dl.run_url(args.performer, dry_run=args.dry_run)
+        else:
+            dl.run_performer(args.performer, dry_run=args.dry_run)
     else:
         parser.print_help()
         return 1

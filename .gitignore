@@ -34,6 +34,10 @@ config.json.*
 # Proxy config (contains credentials — never commit)
 site_proxies.json
 proxies.txt
+# Per-site API credentials (X bearer/auth_token/ct0, etc). Kept out of
+# config.json on purpose so UI reads/screenshots/bug reports can't leak them.
+secrets.json
+secrets.json.*
 # VPN auto-rotation config (machine-local; the .example template stays committed)
 vpn_config.json
 # Streamonitor's vendored config (live model list — usernames/room_ids)

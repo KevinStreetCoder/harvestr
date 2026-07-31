@@ -248,6 +248,22 @@ cp config.example.json config.json
 python webui.py --port 7860
 ```
 
+That ties the recorder to the terminal it was launched from — closing the
+window stops it, mid-recording. For continuous recording use the launcher
+instead, which starts it detached under `pythonw` (no console) so it survives
+the terminal closing:
+
+```powershell
+.\start-harvestr.bat
+.\stop-harvestr.bat
+```
+
+Both accept an optional port (`.\start-harvestr.bat 8080`). The launcher
+refuses to start a second copy — two instances would restore the same tracked
+fleet twice, write the same `live_models.json`, and record into the same
+folders. Startup output goes to `logs\webui.out.log` / `logs\webui.err.log`,
+since a detached process has no console to print a traceback to.
+
 Open **http://127.0.0.1:7860** and you get:
 
 - Performer management (add/remove by name)

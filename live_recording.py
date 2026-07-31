@@ -1585,19 +1585,44 @@ class LiveManager:
         if cache["data"] is not None and (now - cache["ts"]) < 1.5:
             return cache["data"]
         # Brief lock: just grab the bot references, then tally without it.
+        # Carry the site with each bot so the per-site tally comes from THIS
+        # pass rather than a cached one (see below).
         with self._lock:
-            bots = [rm.bot for rm in self._models.values()]
+            pairs = [(rm.site, rm.bot) for rm in self._models.values()]
+        bots = [b for _, b in pairs]
         running = recording = 0
         total_bytes = 0
         status_hist: Dict[str, int] = {}
-        for bot in bots:
+        sites_tally: Dict[str, Dict[str, int]] = {}
+        for site, bot in pairs:
             if getattr(bot, "running", False):
                 running += 1
-            if getattr(bot, "recording", False):
+            is_rec = bool(getattr(bot, "recording", False))
+            if is_rec:
                 recording += 1
             total_bytes += int(getattr(bot, "video_files_total_size", 0) or 0)
             name = getattr(getattr(bot, "sc", None), "name", "UNKNOWN")
             status_hist[name] = status_hist.get(name, 0) + 1
+            _s = sites_tally.setdefault(
+                site, {"total": 0, "recording": 0, "public": 0, "error": 0})
+            _s["total"] += 1
+            if name == "PUBLIC":
+                _s["public"] += 1
+            elif name == "ERROR":
+                _s["error"] += 1
+            if is_rec:
+                _s["recording"] += 1
+        # Per-site health from the tally we JUST computed.
+        #
+        # This used to read the cached `self._sites_health`, which only
+        # get_snapshot() writes — and get_snapshot only runs while the heavy
+        # /api/live/status endpoint is being polled. So the payload mixed a
+        # live `recording` total with a per-site breakdown that could be
+        # minutes stale: observed 63 recording against a site tally summing to
+        # 60, with Chaturbate frozen at an early-ramp-up "1/26 red" while it
+        # was actually running 21 captures. A site strip that reports a healthy
+        # site as red is worse than no strip at all.
+        sites_health = self._site_health(sites_tally)
         out: Dict[str, Any] = {
             "total": len(bots), "running": running, "recording": recording,
             "total_bytes": total_bytes, "status_hist": status_hist,
@@ -1609,7 +1634,7 @@ class LiveManager:
             "avg_fragment_mb": getattr(self, "_avg_fragment_mb", 0.0),
             "top_recorders": getattr(self, "_top_recorders", []),
             "speed_hist": list(getattr(self, "_speed_hist", [])),
-            "sites": getattr(self, "_sites_health", []),
+            "sites": sites_health,
             "alerts": recent_alerts(),
             "uptime_s": self._uptime(),
             "disk_full_eta_s": getattr(self, "_disk_full_eta_s", None),

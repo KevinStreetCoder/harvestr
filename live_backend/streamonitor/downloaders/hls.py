@@ -3,7 +3,7 @@
 
 import os
 import re
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 import m3u8
 import subprocess
 import time
@@ -440,6 +440,19 @@ class _RollingM3UWriter:
             pass
 
 
+def _playlist_has_segments(path: str) -> bool:
+    """True if `path` is an m3u8 carrying at least one real segment URI.
+
+    The writer pre-creates rolling_audio.m3u8 as a header-only placeholder, so
+    existence and non-zero size both lie about whether there is audio to mux.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return any(ln.strip() and not ln.startswith("#") for ln in f)
+    except OSError:
+        return False
+
+
 def _format_bytes(size: int) -> str:
     """Convert bytes to human readable format."""
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
@@ -565,17 +578,18 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
 
     # Select best video variant + detect a SEPARATE audio rendition.
     #
-    # OPT-IN (STRMNTR_CB_AUDIO=1), DEFAULT OFF. Feeding ffmpeg the local master
-    # with a separate audio group stalled ffmpeg's A/V interleave in production
-    # (with -max_interleave_delta 0 it waits INDEFINITELY for audio packets to
-    # interleave and emits nothing) -> the 30s no-data watchdog aborted EVERY CB
-    # capture -> empty files + a hard retry loop across all models. So by default
-    # we keep the proven video-only path (url = best video variant, single
-    # playlist). Re-enable only after verifying the mux holds on a FRESH CB
-    # capture (ffprobe must show streams=video,audio). The playlists themselves
-    # are well-formed; the open problem is purely ffmpeg's local-master + separate
-    # audio-group muxing, so the dual-playlist machinery below stays intact.
-    _audio_enabled = os.environ.get("STRMNTR_CB_AUDIO") == "1"
+    # ON by default; set STRMNTR_CB_AUDIO=0 to force video-only.
+    #
+    # History: this was opt-in/default-OFF (bf0700a) because enabling it made
+    # every CB capture produce empty files. Root cause, measured: ffmpeg was fed
+    # a LOCAL MASTER with an EXT-X-MEDIA audio group, and whenever the mirrored
+    # audio playlist had no segments yet, ffmpeg aborted at input-open and wrote
+    # a 0-byte file with NO streams -- which the no-data watchdog turned into a
+    # retry loop across the whole fleet. Handing the audio playlist to ffmpeg as
+    # a SECOND -i with an optional audio map degrades to video-only in exactly
+    # that case instead (verified: same empty-audio input yields a full video
+    # recording). Without this, cmaf/LL-HLS models record silent.
+    _audio_enabled = os.environ.get("STRMNTR_CB_AUDIO", "1") != "0"
     audio_url = None
     if getattr(pl0, "is_variant", False):
         url, _aud = _pick_video_audio(pl0, url)
@@ -648,10 +662,21 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
             pass
         return False
 
-    # Feed ffmpeg the LOCAL master (video+audio) when we captured a separate audio
-    # rendition, else the single video rolling playlist. Segments fetch direct.
-    ff_input = writer.master_path if (audio_url and os.path.exists(writer.master_path)) else writer.path
-    ok = _ffmpeg_dump_to_ts(self, ff_input, headers, output_path, ffmpeg_proc_ref, local_m3u=True)
+    # Video always comes from the rolling video playlist. When a separate audio
+    # rendition was captured, hand its rolling playlist over as a SECOND input
+    # rather than via a local master with an audio group (see bf0700a).
+    ff_audio = None
+    if audio_url:
+        # Non-zero size isn't enough: the writer pre-creates a HEADER-ONLY
+        # placeholder so ffmpeg always finds the file, and that placeholder is
+        # ~90 bytes of #EXT tags with no segments. Require a real segment line.
+        if _playlist_has_segments(writer.audio_path):
+            ff_audio = writer.audio_path
+        else:
+            # Mirror never landed — record video-only rather than fail outright.
+            self.logger.warning("audio playlist has no segments yet; recording video-only")
+    ok = _ffmpeg_dump_to_ts(self, writer.path, headers, output_path, ffmpeg_proc_ref,
+                            local_m3u=True, audio_path=ff_audio)
 
     # Cleanup
     try:
@@ -686,9 +711,14 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
         return False
 
 
-def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out_path: str, proc_ref: Dict[str, Optional[subprocess.Popen]], local_m3u=False) -> bool:
+def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out_path: str, proc_ref: Dict[str, Optional[subprocess.Popen]], local_m3u=False, audio_path: Optional[str] = None) -> bool:
     """
     Fixed FFmpeg runner with proper flags and stall detection.
+
+    `audio_path` — optional SECOND playlist carrying the audio rendition. When
+    given, ffmpeg muxes video from `url_or_path` and audio from `audio_path` as
+    two separate inputs (see the input section for why that beats a local
+    master with an audio group).
     """
     # Build headers
     hdrs = {
@@ -717,13 +747,15 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
     ]
 
     is_remote = str(url_or_path).startswith(("http://", "https://"))
+    # Options that must be repeated for EACH -i (they're per-input, not global).
+    _per_input: List[str] = []
 
     # HTTP *protocol* options only apply when the INPUT itself is an http(s)
     # URL. Our local rolling .m3u8 (local_m3u=True) is opened via the file
     # protocol, so passing these there makes ffmpeg abort at input-open with
     # "Option headers not found". Only add them for a genuinely remote input.
     if is_remote:
-        cmd.extend([
+        _per_input.extend([
             "-headers", hdr_blob,
             "-rw_timeout", "30000000",       # 30s I/O timeout (was 5s)
             "-reconnect", "1",
@@ -742,18 +774,34 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
     # shows after a few seconds and produced a flood of tiny restart files.
     # -m3u8_hold_counters lets ffmpeg tolerate a briefly-stalled playlist, then
     # still finalize cleanly once the model genuinely goes offline.
-    cmd.extend([
+    _per_input.extend([
         "-live_start_index", "-3",       # start from last 3 segments
         "-max_reload", "100",            # keep reloading the playlist
         "-seg_max_retry", "100",         # retry a failing segment instead of quitting
         "-m3u8_hold_counters", "60",     # tolerate a stalled playlist, then finalize on true offline
     ])
 
-    # Input
+    # Input(s). When the site splits audio into its own rendition (Chaturbate
+    # cmaf/LL-HLS), give ffmpeg TWO independent inputs rather than one local
+    # master with an EXT-X-MEDIA audio group. Measured across full / sparse /
+    # empty audio playlists: the local-master shape writes a 0-byte file with NO
+    # streams as soon as the audio rendition has no segments yet, while two
+    # inputs keep producing a full recording (with audio when it's there, video
+    # alone when it isn't). That 0-byte case is what took CB recording down and
+    # got audio disabled in bf0700a.
+    cmd.extend(_per_input)
     cmd.extend(["-i", url_or_path])
-
-    # Stream mapping
-    cmd.extend(["-map", "0:v:0?", "-map", "0:a?", "-dn", "-sn"])
+    if audio_path:
+        cmd.extend(_per_input)
+        cmd.extend(["-i", audio_path])
+        # '?' on the audio map is load-bearing: if the audio rendition turns out
+        # to be empty at open time, ffmpeg degrades to video-only instead of
+        # aborting. Measured on the local-master shape, an empty audio playlist
+        # produced a 0-byte file with NO streams at all; here the same input
+        # still yields a full video recording.
+        cmd.extend(["-map", "0:v:0", "-map", "1:a:0?", "-dn", "-sn"])
+    else:
+        cmd.extend(["-map", "0:v:0?", "-map", "0:a?", "-dn", "-sn"])
 
     # Stream copy (NO -copyinkf - causes corruption with HLS)
     cmd.extend(["-c", "copy"])
@@ -763,7 +811,13 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
         "-avoid_negative_ts", "make_zero",
         "-muxpreload", "0",
         "-muxdelay", "0",
-        "-max_interleave_delta", "0",
+        # ffmpeg's own default (10s) rather than 0. Measurement showed 0 was NOT
+        # what broke CB audio (identical output either way across full/sparse/
+        # empty audio) -- the input shape was. But 0 documents as "buffer until
+        # every stream has a packet, however far apart", which is unbounded
+        # memory if a stream really does go silent for a long stretch, so there
+        # is no reason to keep it.
+        "-max_interleave_delta", "10000000",
         "-f", "mpegts",
         out_path,
     ])

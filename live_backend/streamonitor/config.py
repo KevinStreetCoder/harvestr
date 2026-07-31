@@ -27,20 +27,59 @@ def load_config():
         with open(config_loc, "w+") as f:
             json.dump([], f, indent=4)
             return []
+    except ValueError:
+        # Corrupted JSON — most likely a half-written file from a crash during
+        # a pre-atomic save. Prefer the .bak the atomic save leaves behind over
+        # losing the whole streamer list.
+        logger.error(f"Corrupted config at {config_loc}")
+        bak = config_loc + ".bak"
+        try:
+            with open(bak, "r") as f:
+                data = json.load(f)
+            logger.warning(f"Recovered {len(data)} streamers from {bak}")
+            return data
+        except Exception:
+            logger.error("No usable backup alongside it")
+            sys.exit(1)
     except Exception as e:
         logger.error(f"Failed to load config: {e}", exc_info=True)
         sys.exit(1)
 
 
 def save_config(config):
-    try:
-        with open(config_loc, "w+") as f:
-            json.dump(config, f, indent=4)
+    """Persist the streamer list without ever truncating the live file.
 
+    Upstream fix (lossless1024/StreaMonitor 68a9c8b): the old version opened
+    config.json with "w+", which truncates FIRST. A crash, power loss or full
+    disk between truncate and write left an empty/half config — i.e. the entire
+    tracked-streamer list gone. Write to .tmp, keep the previous copy as .bak,
+    then swap.
+    """
+    tmp = config_loc + ".tmp"
+    bak = config_loc + ".bak"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(config, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())    # survive a power cut, not just a crash
+        if os.path.exists(config_loc):
+            try:
+                os.replace(config_loc, bak)
+            except OSError as e:
+                logger.warning(f"Could not refresh backup: {e}")
+        os.replace(tmp, config_loc)
         return True
     except Exception as e:
+        # Deliberately NOT sys.exit(1) like upstream: killing a running
+        # recorder fleet over one failed config write loses far more than it
+        # protects. The previous config is still intact on disk either way.
         logger.error(f"Failed to save config: {e}", exc_info=True)
-        sys.exit(1)
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return False
 
 
 def loadStreamers():

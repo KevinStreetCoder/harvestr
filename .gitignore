@@ -39,6 +39,10 @@ vpn_config.json
 # Streamonitor's vendored config (live model list — usernames/room_ids)
 live_backend/config.json
 live_backend/config.json.*
+# Config-database backups. Whole dir: copies get renamed on the way in
+# (live_backend/config.json -> live_backend-config.json), so filename-based
+# rules above don't catch them and the model list would leak.
+backups/
 
 # State files — generated at runtime
 universal.log

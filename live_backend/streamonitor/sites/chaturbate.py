@@ -63,6 +63,15 @@ class Chaturbate(Bot):
                 return None
             
         url = self.lastInfo['url']
+        # Upstream fix (lossless1024/StreaMonitor c538ffe): the ajax response
+        # can carry the 'url' key with an EMPTY value for a room that is
+        # nominally PUBLIC but geo/age-restricted for this exit IP. The
+        # 'url' not in lastInfo check above doesn't catch that, so ffmpeg got
+        # handed an empty input and died with an "Abnormal exit code", which
+        # the run loop then retried on a loop.
+        if not url:
+            self.logger.debug("Empty stream URL (restricted room?)")
+            return None
 
         # Use CMAF if available for better streaming
         if self.lastInfo.get('cmaf_edge'):

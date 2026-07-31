@@ -1,10 +1,106 @@
+import os
 import os.path
-import environ
+
+# Env reader (stdlib only).
+#
+# This used to be `import environ` (the django-environ package). That import
+# name is a trap: django-environ is installed as `django-environ` but imports
+# as `environ`, and there is an unrelated, Python-2-only package on PyPI
+# literally named `environ`. A user hitting "No module named 'environ'" would
+# naturally `pip install environ`, get the py2 package, and the Live backend
+# would then die at import with:
+#     SyntaxError: invalid syntax (environ.py, line 114)
+# which surfaces as a bare "live features disabled" in the UI.
+#
+# The whole dependency bought us ~20 typed getenv calls, so we do them here
+# instead. Semantics deliberately match django-environ's Env: an UNSET var
+# returns the default object untouched (so `str(..., False)` really yields the
+# bool False, and `str(..., None)` yields None), while a SET var is a string
+# that gets cast.
+
+BOOLEAN_TRUE_STRINGS = ('true', 'on', 'ok', 'y', 'yes', '1')
 
 
-env = environ.Env()
+class Env:
+    """Minimal typed os.environ reader — the slice of django-environ we used."""
+
+    @staticmethod
+    def read_env(path='.env'):
+        """Load KEY=VALUE lines from a .env file.
+
+        setdefault, not assignment: env vars already exported by the caller
+        (Harvestr sets STRMNTR_* before importing this module) must win over
+        the file, which is django-environ's behaviour too.
+        """
+        try:
+            with open(path, 'r', encoding='utf-8') as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith('#') or '=' not in line:
+                        continue
+                    key, _, val = line.partition('=')
+                    val = val.strip().strip('\'"')
+                    os.environ.setdefault(key.strip(), val)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _raw(var, default):
+        """Fetch the raw string, or a sentinel meaning "use the default".
+
+        Mirrors django-environ's rule that an EMPTY value collapses to the
+        default when that default is None -- this is what makes
+        `STRMNTR_SEGMENT_TIME=""` mean "don't segment" rather than passing an
+        empty string down into the ffmpeg argv.
+        """
+        val = os.environ.get(var)
+        if val is None or (val == '' and default is None):
+            return None
+        return val
+
+    def str(self, var, default=None):
+        val = self._raw(var, default)
+        return default if val is None else val
+
+    def bool(self, var, default=False):
+        val = self._raw(var, default)
+        if val is None:
+            return default
+        val = val.strip()
+        try:
+            # django-environ treats any non-zero number as true, so "2" → True.
+            return int(val) != 0
+        except ValueError:
+            return val.lower() in BOOLEAN_TRUE_STRINGS
+
+    def int(self, var, default=0):
+        val = self._raw(var, default)
+        if val is None:
+            return default
+        try:
+            return int(float(val.strip()))
+        except (TypeError, ValueError):
+            # django-environ raises here, taking the whole Live backend down at
+            # import time over one typo'd env var. Falling back to the default
+            # keeps recording alive; the value is a tuning knob, not a secret.
+            return default
+
+    def float(self, var, default=0.0):
+        val = self._raw(var, default)
+        if val is None:
+            return default
+        try:
+            return float(val.strip())
+        except (TypeError, ValueError):
+            # Also deliberately unlike django-environ, which strips non-numeric
+            # characters and would read "1:00:00" as 10000.0 -- a silently wrong
+            # free-disk percentage is worse than falling back to the default.
+            return default
+
+
+env = Env()
 if os.path.exists('.env'):
-    environ.Env.read_env('.env')
+    Env.read_env('.env')
 
 
 DOWNLOADS_DIR = env.str("STRMNTR_DOWNLOAD_DIR", "downloads")

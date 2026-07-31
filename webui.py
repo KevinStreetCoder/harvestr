@@ -803,6 +803,15 @@ INDEX_HTML = r"""
   .site-dot .d { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
   .site-dot .d.green { background: var(--good); } .site-dot .d.amber { background: var(--warn); }
   .site-dot .d.red { background: var(--bad); box-shadow: 0 0 6px var(--bad); }
+  .site-dot .d.off { background: var(--text-3); opacity: .5; }
+  /* Clickable per-site recording switch */
+  .site-dot.tog { cursor: pointer; user-select: none; transition: border-color .12s, background .12s, opacity .12s; }
+  .site-dot.tog:hover { border-color: var(--accent); background: var(--bg-2); }
+  .site-dot.tog:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .site-dot.tog.disabled { opacity: .55; }
+  .site-dot.tog.disabled .nm { text-decoration: line-through; }
+  .site-dot.tog.busy { opacity: .4; pointer-events: none; }
+  .site-dot .off-tag { font-size: 9.5px; letter-spacing: .4px; color: var(--text-3); border: 1px solid var(--border); border-radius: 6px; padding: 0 3px; }
   .mon-list { max-height: 180px; overflow-y: auto; font-size: 12px; display: flex; flex-direction: column; gap: 2px; }
   .mon-list .ev { display: flex; gap: 8px; padding: 2px 4px; border-radius: 4px; }
   .mon-list .ev .t { color: var(--text-3); flex: 0 0 auto; font-variant-numeric: tabular-nums; }
@@ -2002,7 +2011,7 @@ INDEX_HTML = r"""
         <div id="mon-vpn" class="mon-vpn">–</div>
       </div>
       <div class="mon-card">
-        <div class="mon-title">Sites</div>
+        <div class="mon-title">Sites <span class="muted" style="text-transform:none;letter-spacing:0">— click to record on/off</span></div>
         <div id="mon-site-dots" class="mon-site-dots">–</div>
       </div>
     </div>
@@ -2697,6 +2706,11 @@ function closeLiveSettings(e) {
 }
 async function saveLiveSettings() {
   const g = (id) => document.getElementById(id);
+  // Deliberately sends ONLY the fields this modal owns. Other live.* keys
+  // (notably disabled_sites, written by the per-site toggles) are preserved
+  // server-side by /api/config's deep merge. Spreading a cached _config.live
+  // here instead would post a stale disabled_sites and silently switch parked
+  // sites back on.
   const liveCfg = {
     live_output_dir:  g('cfg-live-output-dir').value.trim(),
     break_size_mb:    parseInt(g('cfg-live-break-mb').value)    || 0,
@@ -3589,9 +3603,19 @@ function _liveApplyMonitor(s) {
   // Per-site RAG dots
   try {
     const el = document.getElementById('mon-site-dots'), sites = s.sites || [];
-    if (el) el.innerHTML = sites.length ? sites.map(x =>
-      `<span class="site-dot" data-tip="${x.recording}/${x.public} recording, ${x.error} error"><span class="d ${x.level}"></span>${escapeHtml(x.site)} ${x.recording}</span>`).join('')
-      : '<span class="muted">–</span>';
+    if (el) el.innerHTML = sites.length ? sites.map(x => {
+      // enabled may be absent on an older backend — treat that as ON.
+      const on = (x.enabled !== false);
+      const tip = on
+        ? `${x.recording}/${x.public} recording, ${x.error} error — click to STOP recording ${x.site}`
+        : `${x.site} recording is OFF — click to resume`;
+      return `<span class="site-dot tog ${on ? '' : 'disabled'}" role="button" tabindex="0"`
+        + ` data-site="${escapeHtml(x.site)}" data-on="${on ? 1 : 0}" data-tip="${escapeHtml(tip)}">`
+        + `<span class="d ${on ? x.level : 'off'}"></span>`
+        + `<span class="nm">${escapeHtml(x.site)}</span> `
+        + (on ? x.recording : '<span class="off-tag">OFF</span>')
+        + `</span>`;
+    }).join('') : '<span class="muted">–</span>';
   } catch (_) {}
   // Alerts feed
   try {
@@ -4188,10 +4212,52 @@ async function liveToggleAll(on) {
   try {
     const r = await api('/api/live/toggle_all', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({running: on})});
-    toast(`${on ? 'Started' : 'Stopped'} ${r.count} models`, 'success');
+    toast(`${on ? 'Started' : 'Stopped'} ${r.count} models`
+      + (r.skipped_disabled_sites ? ` (${r.skipped_disabled_sites} skipped — site off)` : ''), 'success');
     setTimeout(liveRefresh, 500);
   } catch(e) { toast('Error: '+e.message, 'error'); }
 }
+
+// ── Per-site recording switch ────────────────────────────────────────────
+// Click a dot in the per-site RAG strip to stop/resume recording for that
+// whole site. Takes effect immediately — turning a site off kills its
+// in-flight ffmpeg captures; no restart of Harvestr involved.
+async function liveToggleSite(site, on) {
+  if (!on && !await confirmDialog(
+        `Stop recording ${site} entirely. Any capture in progress on ${site} `
+        + `ends now, and its models stay tracked but idle until you switch it `
+        + `back on.`,
+        {title: `Turn off ${site}`, tone: 'danger', confirmLabel: 'Turn off'})) return;
+  try {
+    const r = await api('/api/live/toggle_site', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({site, enabled: on})});
+    const stopped = r.stopped_recording
+      ? `, ${r.stopped_recording} recording${r.stopped_recording === 1 ? '' : 's'} stopped` : '';
+    toast(`${site} ${on ? 'ON' : 'OFF'} — ${r.models} model${r.models === 1 ? '' : 's'}${stopped}`,
+          on ? 'success' : 'info');
+    setTimeout(liveRefresh, 400);
+  } catch(e) { toast('Error: '+e.message, 'error'); }
+}
+
+// Delegated: the strip's innerHTML is rebuilt on every stats poll, so binding
+// per-dot listeners would be lost (and leak) on each refresh.
+document.addEventListener('DOMContentLoaded', () => {
+  const strip = document.getElementById('mon-site-dots');
+  if (!strip) return;
+  const fire = (ev) => {
+    const dot = ev.target.closest('.site-dot.tog');
+    if (!dot || dot.classList.contains('busy')) return;
+    ev.preventDefault();
+    // Mark busy so the next poll's re-render can't double-fire the request.
+    dot.classList.add('busy');
+    liveToggleSite(dot.dataset.site, dot.dataset.on !== '1');
+  };
+  strip.addEventListener('click', fire);
+  strip.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' || ev.key === ' ') fire(ev);
+  });
+});
 
 // ── Disk / Storage ───────────────────────────────────────────────────────
 let _diskSnapshot = null;
@@ -4816,6 +4882,14 @@ def api_config():
         new_cfg = request.get_json(force=True)
         # Merge (don't wipe fields we don't know about)
         cur = load_config()
+        # ...and merge one level deeper for `live`. A plain update() would swap
+        # the whole sub-dict, so a client that posted a `live` block assembled
+        # before the per-site toggles last wrote `disabled_sites` would silently
+        # re-enable every parked site. Keys the client DID send still win.
+        if isinstance(new_cfg, dict) and isinstance(new_cfg.get("live"), dict):
+            merged_live = dict(cur.get("live") or {})
+            merged_live.update(new_cfg["live"])
+            new_cfg = {**new_cfg, "live": merged_live}
         cur.update(new_cfg)
         save_config(cur)
         return jsonify({"ok": True})
@@ -5647,6 +5721,39 @@ def api_live_toggle_all():
         if running and _archive_is_running():
             archive_killed = _kill_archive_subprocess(timeout=10.0)
         result = _live.toggle_all(running)
+    if archive_killed and isinstance(result, dict):
+        result["archive_killed"] = True
+    return jsonify(result)
+
+
+@app.route("/api/live/toggle_site", methods=["POST"])
+def api_live_toggle_site():
+    """Enable/disable Live recording for one whole site, without a restart.
+
+    Turning a site OFF stops its in-flight captures immediately (Bot.stop()
+    kills the running ffmpeg) and keeps it off across restarts; models stay in
+    the list so turning it back ON resumes them."""
+    if not _live:
+        return jsonify({"error": "live recording unavailable"}), 503
+    body = request.get_json(force=True) or {}
+    site = (body.get("site") or "").strip()
+    if not site:
+        return jsonify({"error": "site required"}), 400
+    if "enabled" not in body and "running" not in body:
+        return jsonify({"error": "enabled required"}), 400
+    enabled = bool(body.get("enabled", body.get("running")))
+    archive_killed = False
+    with _mode_lock:
+        # Same mutual exclusion as the other start paths: bringing a site back
+        # online must not race the Archive downloader for bandwidth/disk.
+        if enabled and _archive_is_running():
+            archive_killed = _kill_archive_subprocess(timeout=10.0)
+        try:
+            result = _live.toggle_site(site, enabled)
+        except (ValueError, RuntimeError) as e:
+            return jsonify({"error": str(e)}), 400
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
     if archive_killed and isinstance(result, dict):
         result["archive_killed"] = True
     return jsonify(result)

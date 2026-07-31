@@ -123,10 +123,27 @@ class XLoveCam(Bot):
             
             if online_status == 1:
                 # Check if there's a free stream available
-                if 'hlsPlaylistFree' in self.lastInfo:
-                    return Status.PUBLIC
-                else:
+                if 'hlsPlaylistFree' not in self.lastInfo:
+                    return Status.UNKNOWN
+                # Upstream fix (lossless1024/StreaMonitor 5153beb): the
+                # hlsPlaylistFree URL is still PRESENT while the model is in a
+                # private show — it just serves a JSON error instead of a
+                # playlist. Taking its presence as "public" made us hand ffmpeg
+                # a non-playlist and log "Abnormal exit code" on repeat. Fetch
+                # it and require real HLS before claiming PUBLIC.
+                try:
+                    r_m3u = self.session.get(self.lastInfo['hlsPlaylistFree'],
+                                             headers=self.headers, timeout=15)
+                    m3u_data = r_m3u.content or b''
+                except (requests.exceptions.RequestException, TimeoutError,
+                        ConnectionError, OSError) as e:
+                    # Don't demote to PRIVATE on a network blip — that would
+                    # make a live model look unavailable. Retry next poll.
+                    self.logger.debug(f"Playlist probe failed: {type(e).__name__}: {e}")
+                    return Status.UNKNOWN
+                if m3u_data.startswith(b'{') or b'EXTM3U' not in m3u_data:
                     return Status.PRIVATE
+                return Status.PUBLIC
             elif online_status == 0:
                 return Status.OFFLINE
             else:

@@ -8,7 +8,8 @@ from urllib.parse import urljoin
 import m3u8
 import warnings
 import filelock
-from time import sleep
+import logging
+from time import sleep, monotonic
 from datetime import datetime
 from threading import Thread, Event, Lock, RLock, BoundedSemaphore
 from typing import Optional, List, Dict, Any, Set, Union, Callable, Type
@@ -35,6 +36,90 @@ except ImportError:
     TERMCOLOR_AVAILABLE = False
     def colored(text: str, color: Optional[str] = None, attrs: Optional[List[str]] = None) -> str:
         return text
+
+# ── Recordings base dir availability ─────────────────────────────────────────
+#
+# DOWNLOADS_DIR can point at a removable/secondary drive (e.g. E:\F\Recordings).
+# If that drive is not mounted, os.makedirs() in genOutFilename() raises
+# FileNotFoundError [WinError 3] for EVERY bot on EVERY status change -- the run
+# loop catches it, sleeps, and retries forever, so nothing records and the log
+# fills with identical tracebacks (753 of them in one observed session).
+#
+# Recordings must stay on the configured drive -- we deliberately do NOT spill
+# onto the system disk, because a half-here/half-there library is worse than a
+# paused one, and C: filling up takes the whole machine down with it. So when
+# the drive is missing we HOLD: refuse to start new captures, say so once, and
+# keep re-checking so recording resumes by itself the moment it is back.
+_base_lock = Lock()
+_base_state: Dict[str, Any] = {"ok": None, "checked_at": 0.0, "reason": ""}
+_BASE_RECHECK_S = 30.0
+# Module-level logger: propagates to the root handler Harvestr installs, so
+# these land in logs/live-errors.log alongside the per-bot messages.
+_dirlog = logging.getLogger("streamonitor.recordings_dir")
+
+
+class RecordingsDirUnavailable(OSError):
+    """The configured recordings drive is not currently reachable.
+
+    Distinct type so the bot run loop can hold quietly instead of treating it
+    as a per-model download error worth a traceback and an error-count bump.
+    """
+
+
+def _recordings_base_ok(force: bool = False) -> bool:
+    """Is DOWNLOADS_DIR reachable/creatable right now?
+
+    Cached for _BASE_RECHECK_S so hundreds of bots asking at once cost one
+    stat, while a remount is still picked up on its own within ~30s.
+    """
+    now = monotonic()
+    with _base_lock:
+        if (not force and _base_state["ok"] is not None
+                and now - _base_state["checked_at"] < _BASE_RECHECK_S):
+            return _base_state["ok"]
+
+        try:
+            os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+            ok, reason = True, ""
+        except OSError as e:
+            ok, reason = False, str(e)
+
+        # Log only on transition, so a long outage costs one line, not one per
+        # bot per retry.
+        if ok is not _base_state["ok"]:
+            if ok:
+                if _base_state["ok"] is not None:
+                    _dirlog.info(
+                        f"Recordings drive {DOWNLOADS_DIR!r} is back — resuming")
+            else:
+                _dirlog.warning(
+                    f"Recordings drive {DOWNLOADS_DIR!r} is unreachable ({reason}). "
+                    f"Holding all recording until it returns — nothing will be "
+                    f"written to the system disk.")
+        _base_state.update(ok=ok, checked_at=now, reason=reason)
+        return ok
+
+
+def _recordings_base() -> str:
+    """The recordings root, or raise if its drive is currently missing."""
+    if not _recordings_base_ok():
+        raise RecordingsDirUnavailable(
+            f"recordings drive unavailable: {DOWNLOADS_DIR} "
+            f"({_base_state['reason']})")
+    return DOWNLOADS_DIR
+
+
+def recordings_dir_status() -> Dict[str, Any]:
+    """Availability of the recordings drive, for the UI/health panel."""
+    # Resolve first: before any recording has been attempted the cached state
+    # is still None, and reporting that as "unavailable" would show a healthy
+    # drive as missing.
+    ok = _recordings_base_ok()
+    with _base_lock:
+        return {"path": DOWNLOADS_DIR,
+                "available": ok,
+                "reason": _base_state["reason"]}
+
 
 # Disable SSL warnings if SSL verification is disabled
 if not VERIFY_SSL:
@@ -154,6 +239,23 @@ class Bot(Thread):
 
     headers: Dict[str, str] = {
         "User-Agent": HTTP_USER_AGENT
+    }
+
+    # Browser-ish navigation headers (upstream a63e161 "Fix SC status").
+    # StripChat's status endpoint started returning junk to requests that look
+    # like a bare API client; sending the same Sec-Fetch/Accept set a real
+    # browser tab sends makes it answer normally again. Merge into `headers`
+    # per-request rather than globally — other sites are happy without it.
+    html_headers: Dict[str, str] = {
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en,en-US;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Pragma': 'no-cache',
+        'Priority': 'u=4',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'cross-site',
+        'Sec-Fetch-User': '?1',
+        'Upgrade-Insecure-Requests': '1',
     }
 
     status_messages: Dict[Status, str] = {
@@ -328,12 +430,46 @@ class Bot(Thread):
             self.log(self.status())
             self.previous_status = self.sc
 
-    def setUsername(self, username: str) -> None:
-        """Update username (e.g., when resolved from room_id)."""
-        if username and username != self.username:
-            old = self.username
-            self.username = username
-            self.logger.info(f"Username updated: {old} -> {username}")
+    def setUsername(self, username: str, move_folder: bool = False) -> None:
+        """Update username (e.g. resolved from room_id, or the model renamed).
+
+        `move_folder` carries the model's existing recordings over to the new
+        name (upstream 68a9c8b). Off by default because the common caller is
+        room-id resolution, where the folder was only just derived and there is
+        nothing to move.
+        """
+        if not username or username == self.username:
+            return
+        old = self.username
+        old_folder = self.outputFolder if move_folder else None
+        self.username = username
+        # Re-derive the identity-dependent bits, or the bot keeps logging under
+        # the old name and linking to a dead profile URL.
+        try:
+            self.logger = self._get_or_create_logger()
+        except Exception:
+            pass
+        try:
+            self.url = self.getWebsiteURL()
+        except Exception:
+            pass
+
+        if old_folder:
+            new_folder = self.outputFolder
+            try:
+                if (os.path.isdir(old_folder) and not os.path.exists(new_folder)
+                        and os.path.abspath(old_folder) != os.path.abspath(new_folder)):
+                    os.rename(old_folder, new_folder)
+                    self.logger.info(f"Moved recordings {old_folder} -> {new_folder}")
+            except OSError as e:
+                # Non-fatal: keep recording under the new name, old files stay
+                # where they are rather than risking a half-moved folder.
+                self.logger.warning(f"Could not move recordings folder: {e}")
+        try:
+            self.cache_file_list()
+        except Exception:
+            pass
+        self.logger.info(f"Username updated: {old} -> {username}")
     
     def get_site_color(self) -> tuple[str, list[str]]:
         """Default color scheme for sites that don't override this method."""
@@ -673,7 +809,13 @@ class Bot(Thread):
             
             self.log(colored('Started downloading show', "green", attrs=["bold"]))
             self.recording = True
-            file = self.genOutFilename()
+            try:
+                file = self.genOutFilename()
+            except RecordingsDirUnavailable:
+                # Drive detached -- hold rather than spill to the system disk.
+                # Already logged once globally by _recordings_base_ok().
+                self.recording = False
+                return False
             ok = False
             
             try:
@@ -843,7 +985,19 @@ class Bot(Thread):
                                 continue
                             self.log('Started downloading show')
                             self.recording = True
-                            file = self.genOutFilename()
+                            try:
+                                file = self.genOutFilename()
+                            except RecordingsDirUnavailable:
+                                # Configured drive is detached. Hold this model
+                                # (no spill to the system disk) and re-poll; the
+                                # single explanatory line was already logged by
+                                # _recordings_base_ok(), so stay quiet here to
+                                # avoid the per-bot traceback storm this
+                                # replaced. Not a download failure, so the
+                                # consecutive-failure tally is left alone.
+                                self.recording = False
+                                self._sleep(self.sleep_on_error)
+                                continue
                             try:
                                 ret = _record_under_cap(self, video_url, file)
                             except Exception as e:
@@ -1062,6 +1216,10 @@ class Bot(Thread):
 
     @property
     def outputFolder(self) -> str:
+        # Plain path join, never raising: read-only callers (folder scans, the
+        # dashboard's recorded-size column) must keep working while the drive
+        # is away. The availability guard lives in genOutFilename(), the only
+        # path that actually needs to CREATE anything.
         base_folder = os.path.join(DOWNLOADS_DIR, f"{self.username} [{self.siteslug}]")
         if hasattr(self, 'isMobile') and callable(getattr(self, 'isMobile', None)):
             try:
@@ -1079,6 +1237,10 @@ class Bot(Thread):
         with _filename_lock:
             folder = self.outputFolder
             if create_dir:
+                # Check the drive first so a missing E:\ raises the dedicated
+                # RecordingsDirUnavailable (logged once, held quietly) instead
+                # of a per-bot FileNotFoundError traceback on every retry.
+                _recordings_base()
                 os.makedirs(folder, exist_ok=True)
 
             ext = f".{CONTAINER}".lower()

@@ -37,7 +37,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 log = logging.getLogger("harvestr.live")
 
@@ -159,25 +159,20 @@ if _STREAMONITOR_PATH:
                     _LIVE_DIR = Path(_user_live).expanduser()
         except Exception:
             pass
-        # Try the configured live dir, but fall back to the default if it's
-        # unreachable (e.g. D:\ no longer mounted). Otherwise StreaMonitor's
-        # bots loop forever on FileNotFoundError when they try to record.
+        # Create the configured live dir if we can. If its drive isn't mounted
+        # we deliberately KEEP pointing at it rather than silently redirecting
+        # to the system disk — recordings belong on the drive the user chose,
+        # and a library split across two disks is worse than a paused one.
+        # bot.py's _recordings_base_ok() holds recording (logging once) while
+        # the drive is away and resumes on its own when it returns.
         try:
             _LIVE_DIR.mkdir(parents=True, exist_ok=True)
         except (OSError, FileNotFoundError) as _mk_err:
             log.warning(
-                f"  [live] configured live_output_dir is unreachable "
-                f"({_user_live!r}: {_mk_err}); falling back to {_LIVE_DEFAULT}"
+                f"  [live] configured live_output_dir {_LIVE_DIR} is currently "
+                f"unreachable ({_mk_err}); recording will HOLD until that drive "
+                f"is attached (nothing will be written to the system disk)"
             )
-            _LIVE_DIR = _LIVE_DEFAULT
-            try:
-                _LIVE_DIR.mkdir(parents=True, exist_ok=True)
-            except Exception as _e2:
-                # If even the default can't be created (extremely unusual),
-                # we still want StreaMonitor to import — it'll just error
-                # at recording-time per-bot rather than tearing the whole
-                # Live subsystem down.
-                log.warning(f"  [live] default live dir also failed: {_e2}")
         os.environ["STRMNTR_DOWNLOAD_DIR"] = str(_LIVE_DIR)
         # Apply Live settings from config.json (read BEFORE import so
         # parameters.py sees them). These map to StreaMonitor's env hooks.
@@ -391,6 +386,14 @@ class LiveManager:
         # Live recordings folder — honors config.live.live_output_dir if set,
         # otherwise defaults to downloads/_live/.
         self.live_dir = self._resolve_live_dir()
+        # Per-site recording switch. A site in here records nothing: its bots
+        # are stopped on toggle-off and are skipped by every start path
+        # (restore, add, start-all) until the user turns it back on. Loaded
+        # BEFORE _restore() so a disabled site never comes back on a restart.
+        self._disabled_sites: Set[str] = self._load_disabled_sites()
+        if self._disabled_sites:
+            log.info(f"  [live] recording disabled for site(s): "
+                     f"{', '.join(sorted(self._disabled_sites))}")
         # On startup, reconstruct from config (do NOT auto-start — user clicks).
         # Defer each bot's synchronous folder scan (cache_file_list) out of
         # __init__ so 1000+ disk scans don't block boot; the background sweeper
@@ -567,6 +570,40 @@ class LiveManager:
         t.start()
         return t
 
+    def _sync_renames(self) -> int:
+        """Re-key models whose bot renamed itself mid-run.
+
+        StripChat models can change username; the bot follows the pointer and
+        updates bot.username (see StripChat._followRename). The manager keys
+        off its OWN copy, so without this the dict key, the UI label and
+        live_models.json all keep the dead name — and on the next restart we'd
+        re-create the bot under a username that 404s forever.
+        """
+        renamed: List[Tuple[str, str, str]] = []      # (old_key, new_key, new_user)
+        with self._lock:
+            for key, rm in list(self._models.items()):
+                cur = (getattr(rm.bot, "username", "") or "").strip()
+                if not cur or cur == rm.username:
+                    continue
+                new_key = self.key_of(cur, rm.site)
+                if new_key in self._models:
+                    # The new name is already tracked separately — drop the
+                    # stale duplicate rather than clobbering the live entry.
+                    self._models.pop(key, None)
+                    log.info(f"[live] {rm.username} -> {cur} [{rm.site}] already "
+                             f"tracked; removed the duplicate old entry")
+                    renamed.append((key, new_key, cur))
+                    continue
+                self._models.pop(key, None)
+                rm.username = cur
+                self._models[new_key] = rm
+                renamed.append((key, new_key, cur))
+        for old_key, new_key, _ in renamed:
+            log.info(f"[live] model renamed: {old_key} -> {new_key}")
+        if renamed:
+            self._save()
+        return len(renamed)
+
     def _wake_site_bots(self, site_slug: str) -> None:
         """After a VPN rotation, clear the ratelimit backoff and wake the given
         site's bots so they immediately re-poll on the new exit IP."""
@@ -665,6 +702,12 @@ class LiveManager:
                                       f"{type(e).__name__}: {e}")
                 except Exception as e:
                     log.debug(f"[live] bulk poller iter: {type(e).__name__}: {e}")
+                # Cheap attribute compare over the fleet; piggybacks on this
+                # loop so a self-renamed bot is re-keyed within ~10s.
+                try:
+                    self._sync_renames()
+                except Exception as e:
+                    log.debug(f"[live] sync renames: {type(e).__name__}: {e}")
                 _time.sleep(10)
 
         t = threading.Thread(target=_loop, name="live-bulk-poller",
@@ -677,10 +720,11 @@ class LiveManager:
         downloads/_live/. Called at init time — same time the env var for
         StreaMonitor is set, so it's consistent with where recordings land.
 
-        If the user-configured dir is unreachable (e.g. an external drive
-        that isn't mounted), fall back to the default. This must match the
-        fallback logic in the module-level STRMNTR_DOWNLOAD_DIR setup so
-        the Bot threads write somewhere they can actually create folders."""
+        A configured dir is honoured even when its drive is not currently
+        mounted: we return it anyway so paths stay stable and recordings keep
+        landing on the drive the user picked once it is reattached. Recording
+        itself is held by bot.py's availability check meanwhile — we never
+        redirect to the system disk behind the user's back."""
         default = self.downloads_dir / "_live"
         try:
             cfg_path = Path(__file__).resolve().parent / "config.json"
@@ -691,16 +735,114 @@ class LiveManager:
                     p = Path(live_dir).expanduser()
                     try:
                         p.mkdir(parents=True, exist_ok=True)
-                        return p
                     except (OSError, FileNotFoundError) as e:
                         log.warning(
-                            f"[live] live_output_dir {p} is unreachable "
-                            f"({e}); falling back to {default}"
+                            f"[live] live_output_dir {p} is unreachable ({e}); "
+                            f"keeping it configured — recording holds until the "
+                            f"drive is attached"
                         )
+                    return p
         except Exception as e:
             log.debug(f"[live] resolve live_dir: {e}")
         default.mkdir(parents=True, exist_ok=True)
         return default
+
+    # ── Per-site enable/disable ──────────────────────────────────────────
+    #
+    # Stored in config.json under live.disabled_sites (a list of site names)
+    # rather than live_models.json, because it's a user setting about SITES,
+    # not about the tracked model list. Storing the DISABLED set (rather than
+    # the enabled one) keeps newly-added site modules on by default.
+
+    @property
+    def _app_config_path(self) -> Path:
+        return Path(__file__).resolve().parent / "config.json"
+
+    def _load_disabled_sites(self) -> Set[str]:
+        try:
+            p = self._app_config_path
+            if p.exists():
+                cfg = json.loads(p.read_text(encoding="utf-8"))
+                raw = (cfg.get("live") or {}).get("disabled_sites") or []
+                return {str(s) for s in raw if str(s).strip()}
+        except Exception as e:
+            log.debug(f"[live] load disabled_sites: {e}")
+        return set()
+
+    def _save_disabled_sites(self) -> None:
+        """Merge the disabled set into config.json without clobbering the rest.
+
+        Re-reads the file first: the Settings modal writes the same config, so
+        a cached copy would silently revert whatever the user changed there.
+        """
+        p = self._app_config_path
+        try:
+            cfg = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+            if not isinstance(cfg, dict):
+                cfg = {}
+            cfg.setdefault("live", {})["disabled_sites"] = sorted(self._disabled_sites)
+            tmp = p.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False),
+                           encoding="utf-8")
+            os.replace(tmp, p)
+        except Exception as e:
+            log.warning(f"  [live] save disabled_sites: {e}")
+
+    def site_enabled(self, site: str) -> bool:
+        return site not in self._disabled_sites
+
+    def toggle_site(self, site: str, running: bool) -> Dict[str, Any]:
+        """Enable or disable recording for one whole site, live.
+
+        Disabling stops every bot on that site immediately -- Bot.stop() calls
+        stopDownload(), which kills the in-flight ffmpeg, so an active capture
+        ends within a second or two. No restart of Harvestr is involved, and
+        models stay in the list so re-enabling picks them straight back up.
+        """
+        if not available:
+            raise RuntimeError("StreaMonitor not available.")
+        site = (site or "").strip()
+        if not site:
+            raise ValueError("site required")
+        if site not in SITES:
+            raise ValueError(f"unsupported site {site!r}; supported: "
+                             f"{sorted(SITES.keys())}")
+
+        with self._lock:
+            if running:
+                self._disabled_sites.discard(site)
+            else:
+                self._disabled_sites.add(site)
+            keys = [k for k, rm in self._models.items() if rm.site == site]
+        self._save_disabled_sites()
+
+        # Apply to the running fleet. Do this OUTSIDE the manager lock:
+        # stop() joins on ffmpeg teardown, and holding _lock across hundreds of
+        # bots would stall every dashboard poll (see the lock-light snapshot
+        # rule in get_snapshot).
+        changed = 0
+        was_recording = 0
+        for key in keys:
+            try:
+                user, _ = key.split("|", 1)
+                if running:
+                    self.start_model(user, site, _save=False)
+                else:
+                    with self._lock:
+                        rm = self._models.get(key)
+                    if rm is not None and getattr(rm.bot, "recording", False):
+                        was_recording += 1
+                    self.stop_model(user, site, _save=False)
+                changed += 1
+            except Exception as e:
+                log.debug(f"  [live] toggle_site {key}: {e}")
+        self._save()
+
+        log.info(f"[live] site {site} recording "
+                 f"{'ENABLED' if running else 'DISABLED'} "
+                 f"({changed} model(s){'' if running else f', {was_recording} mid-recording stopped'})")
+        return {"ok": True, "site": site, "enabled": running,
+                "models": changed, "stopped_recording": was_recording}
 
     def model_folder(self, username: str, site: str) -> Path:
         """Where this model's recordings live on disk."""
@@ -929,7 +1071,10 @@ class LiveManager:
                 created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
             )
             self._models[key] = rm
-            if autostart:
+            # Never autostart into a site the user has switched off — this is
+            # what makes the toggle survive both a restart (_restore) and a
+            # later add of a new model on that site.
+            if autostart and self.site_enabled(site):
                 try:
                     bot.restart()   # StreaMonitor's entry — sets running=True, starts thread
                 except Exception as e:
@@ -950,6 +1095,9 @@ class LiveManager:
                 "slug": getattr(cls, "siteslug", ""),
                 "needs_room_id": bool(RoomIdBot and issubclass(cls, RoomIdBot)),
                 "bulk": bool(getattr(cls, "bulk_update", False)),
+                "enabled": self.site_enabled(name),
+                "tracked": sum(1 for rm in self._models.values()
+                               if rm.site == name),
             })
         return out
 
@@ -1016,8 +1164,14 @@ class LiveManager:
         self._save()
         return {"ok": True, "removed": bool(rm)}
 
-    def start_model(self, username: str, site: str) -> Dict[str, Any]:
+    def start_model(self, username: str, site: str,
+                    _save: bool = True) -> Dict[str, Any]:
         key = self.key_of(username, site)
+        # A disabled site must stay silent even if the user hits Start on an
+        # individual card, otherwise the per-site switch leaks one model at a
+        # time and the "site is off" promise stops being true.
+        if not self.site_enabled(site):
+            return {"ok": False, "skipped": "site_disabled", "site": site}
         with self._lock:
             rm = self._models.get(key)
             if not rm:
@@ -1041,10 +1195,12 @@ class LiveManager:
                                  # spawns or resumes thread
             except Exception as e:
                 log.warning(f"  [live] start {key}: {e}")
-        self._save()
+        if _save:
+            self._save()
         return {"ok": True}
 
-    def stop_model(self, username: str, site: str) -> Dict[str, Any]:
+    def stop_model(self, username: str, site: str,
+                   _save: bool = True) -> Dict[str, Any]:
         key = self.key_of(username, site)
         with self._lock:
             rm = self._models.get(key)
@@ -1054,19 +1210,32 @@ class LiveManager:
                 rm.bot.stop(thread_too=False)
             except Exception as e:
                 log.debug(f"  [live] stop {key}: {e}")
-        self._save()
+        if _save:
+            self._save()
         return {"ok": True}
 
     def toggle_all(self, running: bool) -> Dict[str, Any]:
         n = 0
+        skipped = 0
         for key in list(self._models.keys()):
             try:
                 user, site = key.split("|", 1)
-                (self.start_model if running else self.stop_model)(user, site)
+                # "Start all" respects the per-site switches rather than
+                # overriding them — otherwise one click would silently
+                # re-enable every site the user had deliberately turned off.
+                if running and not self.site_enabled(site):
+                    skipped += 1
+                    continue
+                (self.start_model if running else self.stop_model)(
+                    user, site, _save=False)
                 n += 1
             except Exception as e:
                 log.debug(f"  [live] bulk toggle {key}: {e}")
-        return {"ok": True, "count": n}
+        self._save()
+        out: Dict[str, Any] = {"ok": True, "count": n}
+        if skipped:
+            out["skipped_disabled_sites"] = skipped
+        return out
 
     def get_snapshot(self) -> Dict[str, Any]:
         """Build the full UI-facing state snapshot for the Live tab."""
@@ -1313,8 +1482,13 @@ class LiveManager:
                 level = "red"
             elif (pub >= 8 and rec < pub * 0.75) or (err >= 4 and err >= max(1, rec)):
                 level = "amber"
+            enabled = self.site_enabled(site)
+            if not enabled:
+                # An off site isn't unhealthy, it's parked — don't let it burn
+                # red in the RAG strip and mask a site that really is broken.
+                level = "off"
             out.append({"site": site, "recording": rec, "public": pub,
-                        "error": err, "level": level})
+                        "error": err, "level": level, "enabled": enabled})
         out.sort(key=lambda x: -x["recording"])
         return out
 

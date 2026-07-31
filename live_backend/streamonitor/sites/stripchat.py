@@ -1109,6 +1109,39 @@ class StripChat(RoomIdBot):
         found = self._recursive_find(self.lastInfo, "isDeleted")
         return bool(found) if found is not None else False
 
+    # Guards the rename hop: one follow per getStatus() call, so a server that
+    # points A->B->A can't spin us in a loop.
+    _rename_in_progress = False
+
+    def _followRename(self, body):
+        """If `body` says this model renamed, adopt the new name and re-check.
+
+        Returns the fresh Status after adopting the new username, or None if
+        this wasn't a rename (caller then treats it as NOTEXIST).
+        """
+        if self._rename_in_progress:
+            return None
+        try:
+            data = json.loads(body or "{}")
+        except Exception:
+            return None
+        if not isinstance(data, dict) or data.get("error") != "Model not found":
+            return None
+        new_username = ((data.get("data") or {}).get("newUsername") or "").strip()
+        if not new_username or new_username == self.username:
+            return None
+
+        old = self.username
+        self.logger.info(f"Model renamed on StripChat: {old} -> {new_username}")
+        # move_folder=True keeps this model's back catalogue together under the
+        # new name instead of stranding it under the dead one.
+        self.setUsername(new_username, move_folder=True)
+        self._rename_in_progress = True
+        try:
+            return self.getStatus()
+        finally:
+            self._rename_in_progress = False
+
     def getStatus(self):
         """Check the current status of the model's stream.
 
@@ -1129,7 +1162,13 @@ class StripChat(RoomIdBot):
         """
         url = f'https://stripchat.com/api/front/v2/models/username/{self.username}/cam?uniq={StripChat.uniq()}'
         try:
-            r = self.session.get(url, headers=self.headers, bucket='api')
+            # headers | html_headers: upstream a63e161 — the status endpoint
+            # needs browser-style navigation headers or it answers with junk.
+            # (We omit upstream's `Accept-Encoding: none`: it would disable
+            # gzip on every poll, which at 1000+ tracked models is a lot of
+            # extra bandwidth for no fingerprinting benefit.)
+            r = self.session.get(url, headers={**self.headers, **self.html_headers},
+                                 bucket='api')
         except requests.exceptions.RequestException as e:
             self.logger.debug(f'Network error for {self.username}: '
                                f'{type(e).__name__}: {e}')
@@ -1150,6 +1189,14 @@ class StripChat(RoomIdBot):
 
         # Handle HTTP errors
         if r.status_code == 404:
+            # Upstream fix (lossless1024/StreaMonitor 1fe1fbe / 68a9c8b):
+            # StripChat lets models RENAME. The old username then 404s with
+            # {"error": "Model not found", "data": {"newUsername": "..."}} and
+            # the bot would sit at NOTEXIST forever, silently missing every
+            # future stream. Follow the pointer instead.
+            renamed = self._followRename(body)
+            if renamed is not None:
+                return renamed
             return Status.NOTEXIST
         if r.status_code == 403:
             if looks_like_cf_html(body):

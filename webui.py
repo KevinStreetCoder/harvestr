@@ -1839,12 +1839,15 @@ INDEX_HTML = r"""
         Settings
       </h2>
       <table class="config-table">
-        <tr><td>Output dir</td><td><input id="cfg-output-dir" type="text"/></td></tr>
-        <tr><td>Max videos per site</td><td><input id="cfg-max-videos" type="text"/></td></tr>
-        <tr><td>Max parallel downloads</td><td><input id="cfg-max-parallel" type="text"/></td></tr>
-        <tr><td>aria2c connections</td><td><input id="cfg-aria2c-conn" type="text"/></td></tr>
-        <tr><td>Min disk GB</td><td><input id="cfg-min-disk" type="text"/></td></tr>
-        <tr><td>Min duration (s)</td><td><input id="cfg-min-dur" type="text"/></td></tr>
+        <!-- Placeholders carry the built-in default. An unset key used to render
+             as a blank box, which reads as "broken / not configured" rather than
+             "using the default", and gave no clue what value would apply. -->
+        <tr><td>Output dir</td><td><input id="cfg-output-dir" type="text" placeholder="downloads"/></td></tr>
+        <tr><td>Max videos per site</td><td><input id="cfg-max-videos" type="text" placeholder="200"/></td></tr>
+        <tr><td>Max parallel downloads</td><td><input id="cfg-max-parallel" type="text" placeholder="3"/></td></tr>
+        <tr><td>aria2c connections</td><td><input id="cfg-aria2c-conn" type="text" placeholder="16"/></td></tr>
+        <tr><td>Min disk GB</td><td><input id="cfg-min-disk" type="text" placeholder="5"/></td></tr>
+        <tr><td>Min duration (s)</td><td><input id="cfg-min-dur" type="text" placeholder="30"/></td></tr>
         <tr><td>Rate limit</td><td><input id="cfg-rate" type="text" placeholder="e.g. 500K, 2M, blank = unlimited"/></td></tr>
         <tr><td>Cookies file</td><td><input id="cfg-cookies" type="text" placeholder="Path to cookies.txt (Netscape)"/></td></tr>
         <tr><td>Impersonate</td><td><input id="cfg-imp" type="text" placeholder="chrome"/></td></tr>

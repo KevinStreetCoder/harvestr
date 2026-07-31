@@ -9,6 +9,26 @@ downloader stack (aria2c + ffmpeg + curl fallback), content-based
 deduplication, and an extensible custom-scraper framework for sites
 `yt-dlp` doesn't cover.
 
+## Screenshots
+
+The Live dashboard, recording a real fleet — 1463 models tracked, 92 capturing
+concurrently at 12 MB/s:
+
+![Live dashboard](docs/screenshots/live-dashboard.png)
+
+Monitoring row: write-speed sparkline, the current VPN exit (with auto-rotation
+armed), and per-site switches. Clicking a site stops or resumes recording for
+that whole site immediately — in-flight captures included, no restart:
+
+![Monitoring panels](docs/screenshots/monitoring.png)
+
+Archive mode — performers, per-run settings and the download controls:
+
+![Archive tab](docs/screenshots/archive.png)
+
+<sub>Screenshots are from a live instance. Performer names, event text and the
+VPN exit IP are blurred — the numbers and layout are otherwise untouched.</sub>
+
 ---
 
 ## Why

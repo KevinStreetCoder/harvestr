@@ -25,14 +25,31 @@ if not defined PID (
 
 echo Stopping Harvestr (pid %PID%) on port %PORT%...
 
-REM /T kills the process TREE. The recorder spawns one ffmpeg per active
-REM capture; without /T those would be orphaned, keep running, and hold their
-REM output files open.
+REM --- Drain first, THEN kill --------------------------------------------
+REM This matters more than it looks. The recordings drive is exFAT, which has
+REM no journal: hard-killing while 60-80 ffmpeg processes are mid-write can
+REM leave directory entries that list fine but reject every create afterwards
+REM ("corrupted and unreadable", WinError 1392) and need chkdsk to repair.
+REM Four model folders were lost that way.
 REM
+REM So ask the app to stop all recording first and give ffmpeg a moment to
+REM close its files cleanly. Best-effort: if the API doesn't answer we still
+REM fall through to the kill below.
+echo   asking recorders to stop cleanly...
+powershell -NoProfile -Command ^
+  "try { Invoke-RestMethod -Uri 'http://127.0.0.1:%PORT%/api/live/toggle_all' -Method Post -ContentType 'application/json' -Body '{\"running\":false}' -TimeoutSec 120 | Out-Null } catch { }" >nul 2>&1
+
+REM Wait for ffmpeg to drain (up to ~30s), rather than a blind fixed sleep.
+for /L %%i in (1,1,15) do (
+    tasklist /FI "IMAGENAME eq ffmpeg.exe" 2>nul | find /I "ffmpeg.exe" >nul || goto :drained
+    timeout /t 2 /nobreak >nul 2>&1
+)
+:drained
+
+REM /T kills the process TREE, so any ffmpeg that didn't drain in time dies
+REM with the parent instead of being orphaned holding its output file open.
 REM /F is unavoidable: pythonw has no window, so the polite WM_CLOSE that
-REM taskkill sends without /F is never received. In-flight captures therefore
-REM end abruptly - the partial .tmp.ts files they leave are still complete,
-REM playable recordings up to that moment, they just stop early.
+REM taskkill sends without /F is never received.
 taskkill /PID %PID% /T /F >nul 2>&1
 if errorlevel 1 (
     echo Could not stop pid %PID%. Try again from an elevated prompt:

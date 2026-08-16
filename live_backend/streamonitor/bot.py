@@ -58,6 +58,34 @@ _BASE_RECHECK_S = 30.0
 _dirlog = logging.getLogger("streamonitor.recordings_dir")
 
 
+class ModelFolderUnavailable(OSError):
+    """One model's output folder is unusable, but the drive itself is fine.
+
+    Distinct from RecordingsDirUnavailable (whole drive missing): this is a
+    per-model condition, so the rest of the fleet keeps recording normally.
+    """
+
+
+def _folder_is_corrupt(folder: str) -> bool:
+    """True if `folder` exists but rejects a trivial file create.
+
+    Deliberately probes rather than trusting the original error: a create can
+    also fail for transient reasons (AV scanner, momentary sharing violation),
+    and permanently parking a model over a blip would be worse than the
+    retry-loop this replaces.
+    """
+    probe = os.path.join(folder, ".write-probe.tmp")
+    try:
+        with open(probe, "w") as f:
+            f.write("")
+        os.remove(probe)
+        return False
+    except OSError:
+        return True
+    except Exception:
+        return False
+
+
 class RecordingsDirUnavailable(OSError):
     """The configured recordings drive is not currently reachable.
 
@@ -811,6 +839,13 @@ class Bot(Thread):
             self.recording = True
             try:
                 file = self.genOutFilename()
+            except ModelFolderUnavailable as e:
+                # Per-model folder corrupted on disk (see genOutFilename).
+                self.recording = False
+                if not getattr(self, "_folder_corrupt_logged", False):
+                    self._folder_corrupt_logged = True
+                    self.logger.error(f"{e} — run chkdsk on the recordings drive")
+                return False
             except RecordingsDirUnavailable:
                 # Drive detached -- hold rather than spill to the system disk.
                 # Already logged once globally by _recordings_base_ok().
@@ -987,6 +1022,20 @@ class Bot(Thread):
                             self.recording = True
                             try:
                                 file = self.genOutFilename()
+                            except ModelFolderUnavailable as e:
+                                # This model's folder is corrupted on disk.
+                                # chkdsk territory, not something a retry fixes,
+                                # so say it once and park the model on a long
+                                # backoff instead of failing every poll.
+                                self.recording = False
+                                if not getattr(self, "_folder_corrupt_logged", False):
+                                    self._folder_corrupt_logged = True
+                                    self.logger.error(
+                                        f"{e} — parking this model; run chkdsk "
+                                        f"on the recordings drive to repair it")
+                                self.sc = Status.ERROR
+                                self._sleep(max(self.sleep_on_error, 300))
+                                continue
                             except RecordingsDirUnavailable:
                                 # Configured drive is detached. Hold this model
                                 # (no spill to the system disk) and re-poll; the
@@ -1321,6 +1370,20 @@ class Bot(Thread):
                 self.logger.warning("Filename lock timeout, proceeding without lock")
                 return os.path.join(folder, f"1{ext}")
             except OSError as e:
+                # Returning a filename here regardless meant the caller then
+                # failed to OPEN it, treated that as a normal download failure,
+                # and retried on the next poll — forever. One model with a
+                # corrupted folder logged this 169 times in six hours and could
+                # never record.
+                #
+                # exFAT (which the recordings drive uses) has no journal, so a
+                # hard kill during writes can leave a directory entry that
+                # lists fine but rejects every create with EINVAL / WinError
+                # 1392 "corrupted and unreadable". That is not recoverable from
+                # in-process — it needs chkdsk — so stop hammering it.
+                if _folder_is_corrupt(folder):
+                    raise ModelFolderUnavailable(
+                        f"{folder}: unreadable/corrupted on disk ({e})") from e
                 self.logger.error(f"OS error during filename generation: {e}")
                 return os.path.join(folder, f"1{ext}")
 

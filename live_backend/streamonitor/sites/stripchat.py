@@ -1206,6 +1206,34 @@ class StripChat(RoomIdBot):
         if r.status_code == 429:
             self.logger.error(f'Rate limited (429) for {self.username}')
             return Status.RATELIMIT
+        if r.status_code == 418:
+            # StripChat answers a blocked exit IP with 418 and an EMPTY body.
+            # None of the checks above matched it, so it fell through to the
+            # JSON validation below and every model reported "Non-JSON
+            # response" -- which reads like a parsing quirk and hid a hard
+            # site-wide block for hours (659 models stuck UNKNOWN, recording
+            # nothing, with no backoff and no rotation signal).
+            #
+            # RATELIMIT is the right state: it backs off exponentially AND
+            # reports to the VPN auto-rotator, which can actually clear an
+            # IP-reputation block by moving to a fresh exit.
+            if not getattr(StripChat, '_warned_blocked', False):
+                StripChat._warned_blocked = True
+                self.logger.error(
+                    f'StripChat is blocking this exit IP (HTTP {r.status_code}, '
+                    f'empty body) - backing off and flagging for VPN rotation')
+            else:
+                self.logger.debug(f'still blocked (HTTP {r.status_code})')
+            return Status.RATELIMIT
+        if 400 <= r.status_code < 500:
+            # Deliberately NOT folded into the 418 branch above: 4xx codes like
+            # 405/406 mean OUR request is malformed, and backing off on them
+            # would hide a client bug behind a retry loop instead of surfacing
+            # it. Report the code and treat it as unknown, so it shows up.
+            self.logger.error(
+                f'Unhandled HTTP {r.status_code} for {self.username} '
+                f'(content-type={ct or "none"!r}, {len(body)} bytes)')
+            return Status.UNKNOWN
         if r.status_code >= 500:
             if looks_like_cf_html(body):
                 self.logger.error(f'Cloudflare challenge ({r.status_code}) for {self.username}')
@@ -1215,7 +1243,9 @@ class StripChat(RoomIdBot):
 
         # Validate JSON response
         if "application/json" not in ct or not body.strip():
-            self.logger.warning(f'Non-JSON response for {self.username}')
+            self.logger.warning(
+                f'Non-JSON response for {self.username} '
+                f'(HTTP {r.status_code}, content-type={ct or "none"!r})')
             return Status.UNKNOWN
 
         try:

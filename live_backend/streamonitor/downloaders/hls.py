@@ -815,8 +815,21 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
     else:
         cmd.extend(["-map", "0:v:0?", "-map", "0:a?", "-dn", "-sn"])
 
-    # Stream copy (NO -copyinkf - causes corruption with HLS)
-    cmd.extend(["-c", "copy"])
+    if audio_path:
+        # Video copied, audio RE-ENCODED. This is the part an earlier attempt
+        # here got wrong by using "-c copy" for both.
+        #
+        # The audio rendition is a separate CMAF stream whose timestamps do not
+        # line up with the video's. Copying preserves that skew, which shows up
+        # as audio drifting out of sync -- and can leave ffmpeg unable to
+        # interleave at all, producing nothing. Decoding and re-encoding puts
+        # audio back on a clean timeline derived from the muxer's clock.
+        # Matches the fix the upstream community converged on for CB
+        # (lossless1024/StreaMonitor#346, vnm03's cb-audio-fix branch).
+        cmd.extend(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k"])
+    else:
+        # Single muxed input: copy both, no re-encode needed.
+        cmd.extend(["-c", "copy"])
 
     # Timestamp handling for live streams
     cmd.extend([

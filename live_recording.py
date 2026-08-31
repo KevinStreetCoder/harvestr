@@ -108,6 +108,13 @@ for _cand in _CANDIDATES:
         continue
 
 
+# Where live recordings go when config.json doesn't name a directory.
+# Deliberately the dedicated drive rather than a folder inside the repo:
+# recordings are large and continuous, and defaulting them onto the system
+# disk is how C: ends up full mid-capture (and how stray captures ended up
+# under C:/F/recordings). Override with HARVESTR_LIVE_DEFAULT.
+DEFAULT_LIVE_DIR = os.environ.get("HARVESTR_LIVE_DEFAULT") or "E:\\F\\Recordings"
+
 # ── Try to import the Bot framework ──────────────────────────────────────────
 
 available = False
@@ -147,7 +154,7 @@ if _STREAMONITOR_PATH:
         # live_output_dir = <output_dir>/_live, but the user can override
         # it in the Live settings modal to put recordings on a different
         # drive (e.g. a secondary disk with more space for long streams).
-        _LIVE_DEFAULT = Path(__file__).resolve().parent / "downloads" / "_live"
+        _LIVE_DEFAULT = Path(DEFAULT_LIVE_DIR)
         _LIVE_DIR = _LIVE_DEFAULT
         _user_live: str = ""
         try:
@@ -725,7 +732,7 @@ class LiveManager:
         landing on the drive the user picked once it is reattached. Recording
         itself is held by bot.py's availability check meanwhile — we never
         redirect to the system disk behind the user's back."""
-        default = self.downloads_dir / "_live"
+        default = Path(DEFAULT_LIVE_DIR)
         try:
             cfg_path = Path(__file__).resolve().parent / "config.json"
             if cfg_path.exists():

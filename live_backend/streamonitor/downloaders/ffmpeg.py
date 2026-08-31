@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 
 
-def getVideoFfmpeg(self: 'Bot', url: str, filename: str) -> bool:
+def getVideoFfmpeg(self: 'Bot', url, filename: str) -> bool:
     """
     Live HLS recorder with adaptive stall detection.
     Writes using CONTAINER from parameters (recommended: 'mkv' for safety).
@@ -85,6 +85,12 @@ def getVideoFfmpeg(self: 'Bot', url: str, filename: str) -> bool:
     
     # Playlist change tracking
     last_playlist_id = None
+    # A site may hand us (video_url, audio_url) when audio is a separate
+    # rendition. Everything below treats `url` as the video playlist.
+    _audio_url = None
+    if isinstance(url, (tuple, list)):
+        url, _audio_url = (list(url) + [None, None])[:2]
+
     last_playlist_change = time.monotonic()
     
     # Some CDNs issue a SINGLE-USE playlist token: probing the URL consumes it
@@ -238,11 +244,26 @@ def getVideoFfmpeg(self: 'Bot', url: str, filename: str) -> bool:
         if FFSettings.USE_PROGRESS_FORCED_STATS:
             cmd.extend(['-progress', 'pipe:2', '-stats_period', '5'])
         
-        # Input
-        cmd.extend(['-i', url])
+        _input_opts = list(cmd[1:])  # everything before -i is per-input
+        # Input(s). A (video_url, audio_url) tuple means the site split audio
+        # into its own rendition: pass them as TWO inputs so each carries its
+        # own -user_agent/-headers. ffmpeg does not apply those options when it
+        # follows an EXT-X-MEDIA audio group itself (trac #5358), so that
+        # request goes out bare and a header-checking CDN 403s it.
+        if _audio_url:
+            cmd.extend(['-i', url])
+            cmd.extend(_input_opts)
+            cmd.extend(['-i', _audio_url])
+        else:
+            cmd.extend(['-i', url])
         
         # Stream mapping (video optional, audio optional, no data/subtitles)
-        cmd.extend(['-map', '0:v:0?', '-map', '0:a?', '-dn', '-sn'])
+        if _audio_url:
+            # '?' on audio so a momentarily-empty rendition degrades to
+            # video-only rather than aborting the whole capture.
+            cmd.extend(['-map', '0:v:0', '-map', '1:a:0?', '-dn', '-sn'])
+        else:
+            cmd.extend(['-map', '0:v:0?', '-map', '0:a?', '-dn', '-sn'])
         
         # Stream copy by default. A bot can ask for a re-encoded audio track
         # (ffmpeg_audio_codec) when its audio arrives as a SEPARATE rendition

@@ -1,4 +1,6 @@
 import os
+import m3u8
+from urllib.parse import urljoin
 import re
 import requests
 from typing import Optional, Set
@@ -62,7 +64,7 @@ class Chaturbate(Bot):
         self.headers["Referer"] = "https://chaturbate.com/"
         if os.environ.get("STRMNTR_CB_AUDIO") == "1":
             self.getVideo = lambda _s, url, filename: (
-                getVideoFfmpeg(self, url, filename)
+                getVideoFfmpeg(self, self._resolveLLHLS(url), filename)
                 if url and "llhls.m3u8" in url
                 else getVideoNativeHLS(self, url, filename)
             )
@@ -137,6 +139,39 @@ class Chaturbate(Bot):
         # getVideoFfmpeg's no-data watchdog (aborts a capture writing 0 bytes
         # within NO_DATA_ABORT_SEC), not by a probe here.
         return url
+
+    def _resolveLLHLS(self, master_url):
+        """Split CB's llhls master into (video_chunklist, audio_rendition).
+
+        Returned as a tuple so the downloader can give ffmpeg two inputs.
+        Falls back to the master URL unchanged if anything is unexpected --
+        video-only beats no recording.
+        """
+        try:
+            r = self.session.get(master_url, headers=self.headers, timeout=20)
+            if r.status_code != 200:
+                return master_url
+            master = m3u8.loads(r.text)
+        except Exception as e:
+            self.logger.debug(f"llhls resolve failed: {type(e).__name__}: {e}")
+            return master_url
+
+        audio = {}
+        for md in getattr(master, "media", []) or []:
+            if md.type == "AUDIO" and md.uri:
+                audio[md.group_id] = urljoin(master_url, md.uri)
+        best, best_bw, grp = None, -1, None
+        for pl in getattr(master, "playlists", []) or []:
+            bw = getattr(pl.stream_info, "bandwidth", 0) or 0
+            if bw > best_bw:
+                best, best_bw = urljoin(master_url, pl.uri), bw
+                grp = getattr(pl.stream_info, "audio", None)
+        if not best:
+            return master_url
+        a = audio.get(grp)
+        if not a:
+            return best
+        return (best, a)
 
     def getStatus(self) -> Status:
         """Check the current status of the stream."""

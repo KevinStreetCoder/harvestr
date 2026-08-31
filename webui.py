@@ -860,6 +860,15 @@ INDEX_HTML = r"""
   .mon-sub { font-size: 11.5px; color: var(--text-3); margin-top: 6px; }
   .mon-vpn { font-size: 12.5px; line-height: 1.65; }
   .mon-vpn b { color: var(--text); } .mon-vpn .muted { color: var(--text-3); }
+  .vpn-rot-row { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+  .vpn-toggle { position: relative; width: 34px; height: 18px; padding: 0; border-radius: 9px;
+                border: 1px solid var(--border-2); background: var(--bg-3); cursor: pointer;
+                flex: 0 0 auto; transition: background .15s, border-color .15s; }
+  .vpn-toggle .knob { position: absolute; top: 2px; left: 2px; width: 12px; height: 12px;
+                      border-radius: 50%; background: var(--text-3); transition: left .15s, background .15s; }
+  .vpn-toggle.on { background: #1f4d33; border-color: var(--good); }
+  .vpn-toggle.on .knob { left: 18px; background: var(--good); }
+  .vpn-toggle:disabled { opacity: .5; cursor: wait; }
   .mon-site-dots { display: flex; flex-wrap: wrap; gap: 6px; }
   .site-dot { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; padding: 3px 8px; border-radius: 12px; background: var(--bg); border: 1px solid var(--border); }
   .site-dot .d { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
@@ -3808,13 +3817,46 @@ async function pollVpnStatus() {
     const v = await r.json(), el = document.getElementById('mon-vpn'); if (!el) return;
     if (!v.configured && !v.exit_ip) { el.innerHTML = '<span class="muted">VPN not detected</span>'; return; }
     const flag = v.country ? _countryFlag(v.country) : '';
-    const rot = v.configured ? ('rotation armed · ' + (v.locations || []).join('/')) : 'rotation off';
+    const on = v.enabled !== false;
+    // "armed" needs BOTH the switch on and a usable CLI+locations; say which
+    // is missing rather than a bare "off" the user can't act on.
+    const rot = !on ? 'rotation OFF'
+              : (v.configured ? ('rotation armed · ' + (v.locations || []).join('/'))
+                              : 'rotation on, but Mullvad CLI/locations missing');
     const last = (v.last_rotate_ago_s != null) ? ('last rotate ' + durHuman(v.last_rotate_ago_s) + ' ago') : 'no rotations yet';
     el.innerHTML =
       `<div><b>${flag} ${v.country || '?'}</b> <span class="muted">${escapeHtml(v.relay || '')}</span></div>` +
       `<div>${escapeHtml(v.exit_ip || '–')} <span class="muted">${v.connected ? 'connected' : 'reconnecting'}</span></div>` +
-      `<div class="muted">${rot}</div><div class="muted">${last}</div>`;
+      `<div class="vpn-rot-row">` +
+        `<button class="vpn-toggle ${on ? 'on' : 'off'}" id="vpn-rot-toggle"` +
+        ` role="switch" aria-checked="${on}"` +
+        ` data-tip="${on ? 'Auto-rotate the exit IP when a site rate-limits. Click to disable.'
+                         : 'Auto-rotation disabled. Click to enable.'}">` +
+          `<span class="knob"></span></button>` +
+        `<span class="muted">${rot}</span>` +
+      `</div>` +
+      `<div class="muted">${last}</div>`;
+    const tg = document.getElementById('vpn-rot-toggle');
+    if (tg) tg.onclick = () => vpnToggleRotation(!on);
   } catch (_) {}
+}
+async function vpnToggleRotation(enable) {
+  const tg = document.getElementById('vpn-rot-toggle');
+  if (tg) tg.disabled = true;            // stop a double-click racing the poll
+  try {
+    const r = await api('/api/live/vpn/rotation', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: enable})});
+    toast('VPN auto-rotation ' + (enable ? 'enabled' : 'disabled')
+          + (r && r.applied_live === false ? ' (saved; restart to apply)' : ''),
+          enable ? 'success' : 'info');
+  } catch (e) {
+    toast('Could not change rotation: ' + (e.message || e), 'error');
+  } finally {
+    if (tg) tg.disabled = false;
+    window._lastVpnPoll = 0;             // force an immediate refresh
+    try { await pollVpnStatus(); } catch (_) {}
+  }
 }
 function _countryFlag(cc) { try { return cc.toUpperCase().replace(/./g, c => String.fromCodePoint(127397 + c.charCodeAt(0))); } catch (_) { return ''; } }
 function _notifyRed(msg) {
@@ -5152,6 +5194,39 @@ def api_vpn_status():
         return jsonify(_vpn.exit_info())
     except Exception as e:
         return jsonify({"configured": False, "error": str(e)})
+
+
+@app.route("/api/live/vpn/rotation", methods=["POST"])
+def api_live_vpn_rotation():
+    """Turn VPN auto-rotation on/off from the dashboard.
+
+    Persists to vpn_config.json and applies immediately -- vpn_rotator.reload()
+    drops its cached config, so no restart is needed. Turning rotation OFF does
+    not disconnect the VPN; it only stops Harvestr rotating the exit on a
+    rate-limit storm.
+    """
+    # Deliberately NO _live guard: this only reads/writes vpn_config.json and
+    # reloads the rotator's cached config. Requiring the live manager made the
+    # toggle return 503 during the (multi-minute) fleet restore, which is
+    # exactly when someone might want to turn rotation off.
+    body = request.get_json(silent=True) or {}
+    if "enabled" not in body:
+        return jsonify({"error": "enabled required (true/false)"}), 400
+    want = bool(body.get("enabled"))
+    try:
+        cfg = load_vpn_config()
+        cfg["enabled"] = want
+        save_vpn_config(cfg)
+        try:
+            from streamonitor.utils import vpn_rotator as _vr
+            _vr.reload()
+        except Exception as e:
+            # Saved, but the running rotator kept its cached copy.
+            return jsonify({"ok": True, "enabled": want,
+                            "applied_live": False, "reason": str(e)})
+        return jsonify({"ok": True, "enabled": want, "applied_live": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/live/netconfig/rotate", methods=["POST"])

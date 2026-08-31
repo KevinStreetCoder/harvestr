@@ -99,6 +99,14 @@ def reload() -> None:
     with _lock:
         _cfg = None
         _cli = None
+    # Also drop the exit-info cache. It carries `enabled` and lives 30s, so
+    # without this a settings change (e.g. the dashboard rotation toggle) is
+    # applied but the UI keeps reporting the OLD value for up to half a minute
+    # -- the switch appears to snap back and look broken.
+    # (_exit_cache is defined further down; module globals resolve at CALL
+    # time, and reload() is only ever called after import, so this is fine.)
+    _exit_cache["ts"] = 0.0
+    _exit_cache["data"] = None
 
 
 def _find_cli() -> Optional[str]:

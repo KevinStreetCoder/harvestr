@@ -1,9 +1,11 @@
+import os
 import re
 import requests
 from typing import Optional, Set
 from streamonitor.bot import Bot
 from streamonitor.enums import Status, Gender
 from streamonitor.downloaders.hls import getVideoNativeHLS
+from streamonitor.downloaders.ffmpeg import getVideoFfmpeg
 
 
 class Chaturbate(Bot):
@@ -31,7 +33,32 @@ class Chaturbate(Bot):
         # playlist + segments with python-requests (which the edge allows) and
         # feeds ffmpeg LOCALLY, bypassing the ffmpeg-HTTP block. Verified live:
         # 2 MB in 16s via this path where direct ffmpeg got 0 bytes / HTTP 403.
-        self.getVideo = getVideoNativeHLS
+        # CB serves llhls.m3u8: a MASTER that declares the audio rendition
+        # (EXT-X-MEDIA:TYPE=AUDIO) which the video variants reference. Mirroring
+        # locally is what loses the audio -- the mirror follows one video
+        # chunklist, and those are video-only.
+        #
+        # Handing the remote master straight to ffmpeg captures both. Three
+        # things had to be true for that to work, each verified against a live
+        # stream:
+        #   1. no -fflags nobuffer  (with it: 0 bytes, capture dies)
+        #   2. no playlist pre-probe (CB's token is single-use)
+        #   3. audio re-encoded to AAC (separate rendition, timestamps skewed)
+        #
+        # OPT-IN via STRMNTR_CB_AUDIO=1. Default stays on the proven
+        # video-only mirror path: a silent recording beats no recording, and
+        # this route has broken CB outright before.
+        self.ffmpeg_nobuffer = False
+        self.playlist_probe = False
+        self.ffmpeg_audio_codec = "aac"
+        if os.environ.get("STRMNTR_CB_AUDIO") == "1":
+            self.getVideo = lambda _s, url, filename: (
+                getVideoFfmpeg(self, url, filename)
+                if url and "llhls.m3u8" in url
+                else getVideoNativeHLS(self, url, filename)
+            )
+        else:
+            self.getVideo = getVideoNativeHLS
         # Pull SEGMENTS direct, not through the residential proxy: they aren't
         # IP-bound, ffmpeg can't authenticate to the proxy, and segment bandwidth
         # is large. Only the Cloudflare-gated ajax + playlist go via the proxy

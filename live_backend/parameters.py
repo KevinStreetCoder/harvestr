@@ -149,6 +149,11 @@ VR_FORMAT_SUFFIX = env.bool("STRMNTR_VR_FORMAT_SUFFIX", True)
 # SEGMENT_TIME = '1:00:00'
 SEGMENT_TIME = env.str("STRMNTR_SEGMENT_TIME", None)
 
+# Keep only the N newest recordings per model; 0 (default) keeps everything.
+# Applied after a recording finishes -- see Bot._prune_old_recordings.
+KEEP_LAST_N = env.int("STRMNTR_KEEP_LAST_N", 0)
+
+
 # HTTP Manager configuration
 
 # Bind address for the web server

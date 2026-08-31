@@ -87,7 +87,12 @@ def getVideoFfmpeg(self: 'Bot', url: str, filename: str) -> bool:
     last_playlist_id = None
     last_playlist_change = time.monotonic()
     
-    if FFSettings.PLAYLIST_PROBE_ENABLED:
+    # Some CDNs issue a SINGLE-USE playlist token: probing the URL consumes it
+    # and ffmpeg, the next consumer, then gets 403. Those bots set
+    # playlist_probe = False and rely on the no-data watchdog instead.
+    _probe_allowed = (FFSettings.PLAYLIST_PROBE_ENABLED
+                      and getattr(self, "playlist_probe", True))
+    if _probe_allowed:
         import requests as _req
         
         def probe_playlist():
@@ -204,7 +209,12 @@ def getVideoFfmpeg(self: 'Bot', url: str, filename: str) -> bool:
         
         # FFmpeg flags - CRITICAL FIX: Combine all fflags into ONE argument
         fflags_parts = []
-        if FFSettings.ENABLE_FFLAGS_NOBUFFER:
+        # nobuffer is per-bot overridable. Bisected against a live Chaturbate
+        # stream: with nobuffer the capture writes 0 bytes and dies; without
+        # it the same command yields audio+video. hls.py removed it for the
+        # same reason -- it makes capture hypersensitive to CDN keepalive
+        # jitter so ffmpeg exits before writing anything.
+        if FFSettings.ENABLE_FFLAGS_NOBUFFER and getattr(self, "ffmpeg_nobuffer", True):
             fflags_parts.append('nobuffer')
         if FFSettings.ENABLE_FFLAGS_DISCARDCORRUPT:
             fflags_parts.append('+discardcorrupt')
@@ -227,8 +237,15 @@ def getVideoFfmpeg(self: 'Bot', url: str, filename: str) -> bool:
         # Stream mapping (video optional, audio optional, no data/subtitles)
         cmd.extend(['-map', '0:v:0?', '-map', '0:a?', '-dn', '-sn'])
         
-        # Stream copy (no re-encoding)
-        cmd.extend(['-c', 'copy'])
+        # Stream copy by default. A bot can ask for a re-encoded audio track
+        # (ffmpeg_audio_codec) when its audio arrives as a SEPARATE rendition
+        # whose timestamps don't line up with the video -- copying preserves
+        # that skew and the result drifts out of sync.
+        _acodec = getattr(self, "ffmpeg_audio_codec", None)
+        if _acodec:
+            cmd.extend(['-c:v', 'copy', '-c:a', _acodec, '-b:a', '192k'])
+        else:
+            cmd.extend(['-c', 'copy'])
         
         # MP4-specific: AAC ADTS to ASC bitstream filter
         if MUX == 'mp4':

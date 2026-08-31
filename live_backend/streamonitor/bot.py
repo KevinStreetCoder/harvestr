@@ -9,7 +9,7 @@ import m3u8
 import warnings
 import filelock
 import logging
-from time import sleep, monotonic
+from time import sleep, monotonic, time as _wall_clock
 from datetime import datetime
 from threading import Thread, Event, Lock, RLock, BoundedSemaphore
 from typing import Optional, List, Dict, Any, Set, Union, Callable, Type
@@ -1074,6 +1074,13 @@ class Bot(Thread):
                             self._consec_dl_fail = 0
                             self.log('Recording ended')
                             try:
+                                from parameters import KEEP_LAST_N
+                                if KEEP_LAST_N > 0:
+                                    self._prune_old_recordings(KEEP_LAST_N,
+                                                               protect=file)
+                            except Exception as e:
+                                self.logger.debug(f"prune skipped: {e}")
+                            try:
                                 self.cache_file_list()
                             except Exception as e:
                                 self.logger.exception(e)
@@ -1386,6 +1393,60 @@ class Bot(Thread):
                         f"{folder}: unreadable/corrupted on disk ({e})") from e
                 self.logger.error(f"OS error during filename generation: {e}")
                 return os.path.join(folder, f"1{ext}")
+
+    # Video extensions we own. Deliberately excludes .filename.lock and any
+    # partial temp artefacts we don't recognise.
+    _PRUNABLE_EXT = (".ts", ".mkv", ".mp4")
+
+    def _prune_old_recordings(self, keep: int, protect: str = "") -> int:
+        """Delete all but the `keep` newest recordings in this model's folder.
+
+        This DELETES user data, so it is deliberately conservative:
+          * no-op unless keep > 0 (the default is 0 = keep everything)
+          * only touches known video extensions
+          * never touches the file just written (`protect`) or anything
+            modified in the last 60s, so an in-flight capture is safe
+          * a failure to delete one file never aborts the rest
+        """
+        if keep <= 0:
+            return 0
+        folder = self.outputFolder
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            return 0
+        protect_abs = os.path.abspath(protect) if protect else ""
+        now = _wall_clock()
+        vids = []
+        for n in names:
+            if not n.lower().endswith(self._PRUNABLE_EXT):
+                continue
+            p = os.path.join(folder, n)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            if protect_abs and os.path.abspath(p) == protect_abs:
+                continue
+            if now - st.st_mtime < 60:      # still being written / just closed
+                continue
+            vids.append((st.st_mtime, p, st.st_size))
+        if len(vids) <= keep:
+            return 0
+        vids.sort(reverse=True)             # newest first
+        removed = freed = 0
+        for _, p, size in vids[keep:]:
+            try:
+                os.remove(p)
+                removed += 1
+                freed += size
+            except OSError as e:
+                self.logger.debug(f"prune: could not remove {p}: {e}")
+        if removed:
+            self.logger.info(
+                f"Pruned {removed} old recording(s), freed "
+                f"{freed / 1048576:.0f} MB (keeping newest {keep})")
+        return removed
 
     def export(self) -> Dict[str, Any]:
         data = {

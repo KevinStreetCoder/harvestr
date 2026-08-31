@@ -199,6 +199,12 @@ if _STREAMONITOR_PATH:
                     os.environ["STRMNTR_STATUS_FREQ"] = str(pi)
                 # Min download speed → FFMPEG_READRATE (bytes/s); skip
                 # if 0 so StreaMonitor uses its default.
+                # Retention: keep only the N newest recordings per model.
+                # This setting existed in the UI and in config.json but
+                # nothing ever read it, so it silently did nothing.
+                kn = int(_live_cfg.get("keep_last_n") or 0)
+                if kn > 0:
+                    os.environ["STRMNTR_KEEP_LAST_N"] = str(kn)
                 ms = int(_live_cfg.get("min_speed_kbps") or 0)
                 if ms > 0:
                     os.environ["STRMNTR_FFMPEG_READRATE"] = str(ms * 1024)

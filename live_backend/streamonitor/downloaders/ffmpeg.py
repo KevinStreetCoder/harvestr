@@ -184,8 +184,15 @@ def getVideoFfmpeg(self: 'Bot', url: str, filename: str) -> bool:
             cmd.extend(['-cookies', ck])
         
         # Timeout settings
-        rw_us = str(int(FFSettings.RW_TIMEOUT_SEC * 1_000_000))
-        sock_us = str(int(FFSettings.SOCKET_TIMEOUT_SEC * 1_000_000))
+        # Per-bot socket/read timeout. The 5s default is fine for CDNs that
+        # push segments steadily, but a low-latency HLS edge can pause longer
+        # than that between segments, and ffmpeg then gives up before writing
+        # anything. Bots on such a CDN raise it via ffmpeg_timeout_sec.
+        _tmo = getattr(self, "ffmpeg_timeout_sec", None)
+        _rw_sec = _tmo if _tmo else FFSettings.RW_TIMEOUT_SEC
+        _sock_sec = _tmo if _tmo else FFSettings.SOCKET_TIMEOUT_SEC
+        rw_us = str(int(_rw_sec * 1_000_000))
+        sock_us = str(int(_sock_sec * 1_000_000))
         cmd.extend([
             '-timeout', sock_us,
             '-rw_timeout', rw_us,

@@ -51,6 +51,15 @@ class Chaturbate(Bot):
         self.ffmpeg_nobuffer = False
         self.playlist_probe = False
         self.ffmpeg_audio_codec = "aac"
+        # 5s is too tight for CB's llhls edge -- the bisect that produced
+        # audio+video used 20s; at 5s ffmpeg gave up before writing.
+        self.ffmpeg_timeout_sec = 20
+        # The edge refuses ffmpeg on the CHUNKLIST/SEGMENTS with 403 unless the
+        # request carries a Referer (the master itself serves fine, which masks
+        # it -- ffmpeg reconnects mid-stream then 403s). Give this bot its own
+        # header dict so ffmpeg sends one; the class attribute is shared.
+        self.headers = dict(self.headers or {})
+        self.headers["Referer"] = "https://chaturbate.com/"
         if os.environ.get("STRMNTR_CB_AUDIO") == "1":
             self.getVideo = lambda _s, url, filename: (
                 getVideoFfmpeg(self, url, filename)

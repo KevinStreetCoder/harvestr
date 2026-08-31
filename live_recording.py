@@ -1237,6 +1237,33 @@ class LiveManager:
             out["skipped_disabled_sites"] = skipped
         return out
 
+    def stop_all_for_shutdown(self) -> Dict[str, Any]:
+        """Stop every recorder in memory WITHOUT persisting `running: false`.
+
+        The graceful-stop script drains recordings before killing the process
+        so ffmpeg closes its files cleanly (exFAT has no journal, and a hard
+        kill mid-write corrupted four model folders). But draining via
+        toggle_all(False) also SAVED the stopped state, so the next boot
+        restored all 1551 models as stopped and recorded nothing until someone
+        pressed Start all.
+
+        Stopping without saving keeps the on-disk file describing what the user
+        wanted running, so a restart comes back recording on its own.
+        """
+        with self._lock:
+            bots = [rm.bot for rm in self._models.values()]
+        stopped = 0
+        for bot in bots:
+            try:
+                if getattr(bot, "running", False):
+                    bot.stop(thread_too=False)
+                    stopped += 1
+            except Exception as e:
+                log.debug(f"  [live] shutdown stop: {e}")
+        log.info(f"[live] drained {stopped} recorder(s) for shutdown "
+                 f"(running-state deliberately NOT persisted)")
+        return {"ok": True, "stopped": stopped}
+
     def get_snapshot(self) -> Dict[str, Any]:
         """Build the full UI-facing state snapshot for the Live tab."""
         models: List[Dict[str, Any]] = []

@@ -5902,6 +5902,18 @@ def api_live_toggle_all():
     return jsonify(result)
 
 
+@app.route("/api/live/prepare_shutdown", methods=["POST"])
+def api_live_prepare_shutdown():
+    """Drain recorders before the process is killed, WITHOUT persisting the
+    stopped state -- so the next start comes back recording by itself."""
+    if not _live:
+        return jsonify({"error": "live recording unavailable"}), 503
+    try:
+        return jsonify(_live.stop_all_for_shutdown())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/live/toggle_site", methods=["POST"])
 def api_live_toggle_site():
     """Enable/disable Live recording for one whole site, without a restart.

@@ -590,11 +590,61 @@ class StripChat(RoomIdBot):
             pass
         return None
 
+    # username -> numeric model id, resolved once and shared by every bot.
+    # 659 SC bots polling on a loop must not each re-resolve on every cycle.
+    _model_ids: Dict[str, str] = {}
+    _model_ids_lock = None
+
+    @classmethod
+    def _resolveModelId(cls, session, username, headers, logger=None):
+        """Resolve a StripChat username to its numeric model id.
+
+        StripChat retired the username-keyed cam endpoint (upstream issues
+        #368/#370): it now answers HTTP 418 with an empty body for every
+        streamer. The replacement is two-step --
+            /api/front/users/user-ids/{username}  -> {"id": N}
+            /api/front/v2/models/{N}/cam          -> {"cam": ..., "user": ...}
+        Same response shape as before, so only the lookup changes.
+        """
+        import threading
+        if cls._model_ids_lock is None:
+            cls._model_ids_lock = threading.Lock()
+        key = username.lower()
+        with cls._model_ids_lock:
+            hit = cls._model_ids.get(key)
+        if hit:
+            return hit
+        try:
+            r = session.get(
+                f'https://stripchat.com/api/front/users/user-ids/{username}',
+                headers=headers, bucket='api')
+            if r.status_code == 404:
+                return None
+            if r.status_code != 200:
+                if logger:
+                    logger.debug(f'user-ids lookup HTTP {r.status_code}')
+                return None
+            mid = (r.json() or {}).get('id')
+        except Exception as e:
+            if logger:
+                logger.debug(f'user-ids lookup failed: {type(e).__name__}: {e}')
+            return None
+        if not mid:
+            return None
+        mid = str(mid)
+        with cls._model_ids_lock:
+            cls._model_ids[key] = mid
+        return mid
+
     def getRoomIdFromUsername(self, username):
         """Resolve room/user ID from username."""
         try:
+            mid = self._resolveModelId(self.session, username, self.headers,
+                                       self.logger)
+            if not mid:
+                return None
             r = self.session.get(
-                f'https://stripchat.com/api/front/v2/models/username/{username}/cam',
+                f'https://stripchat.com/api/front/v2/models/{mid}/cam',
                 headers=self.headers, bucket='api'
             )
             if r.status_code == 200:
@@ -631,9 +681,11 @@ class StripChat(RoomIdBot):
         info.
 
         Verified working endpoints (May 2026):
-          - `/api/front/v2/models/username/{u}/cam?uniq=...` — returns
-            the cam state for one model. THE ONLY working per-bot
-            status endpoint.
+          - `/api/front/users/user-ids/{u}` -> {"id": N}, then
+            `/api/front/v2/models/{N}/cam?uniq=...` — the per-bot status
+            endpoint. RETIRED (Aug 2026): the old username-keyed form
+            `/api/front/v2/models/username/{u}/cam` now answers HTTP 418
+            with an empty body for every streamer (upstream #368/#370).
 
         So we fall back to PARALLEL per-username polling for the
         bulk method. Concurrency is bounded by the shared HTTP semaphore
@@ -1160,15 +1212,21 @@ class StripChat(RoomIdBot):
             which doesn't inherit from RequestException
           - Any unexpected exception → ERROR (so we still notice real bugs)
         """
-        url = f'https://stripchat.com/api/front/v2/models/username/{self.username}/cam?uniq={StripChat.uniq()}'
+        # Prefer a room_id we already hold; otherwise resolve (and cache) it.
+        # The old username-keyed endpoint now 418s for every streamer.
+        model_id = self.room_id or self._resolveModelId(
+            self.session, self.username, self.headers, self.logger)
+        if not model_id:
+            return Status.NOTEXIST
+        if not self.room_id:
+            self.room_id = str(model_id)
+        url = (f'https://stripchat.com/api/front/v2/models/{model_id}/cam'
+               f'?uniq={StripChat.uniq()}')
         try:
-            # headers | html_headers: upstream a63e161 — the status endpoint
-            # needs browser-style navigation headers or it answers with junk.
-            # (We omit upstream's `Accept-Encoding: none`: it would disable
-            # gzip on every poll, which at 1000+ tracked models is a lot of
-            # extra bandwidth for no fingerprinting benefit.)
-            r = self.session.get(url, headers={**self.headers, **self.html_headers},
-                                 bucket='api')
+            # Plain headers: verified against the new endpoint. Sending
+            # html_headers here would set Accept: text/html on a JSON API,
+            # which is the wrong thing to ask a JSON endpoint for.
+            r = self.session.get(url, headers=self.headers, bucket='api')
         except requests.exceptions.RequestException as e:
             self.logger.debug(f'Network error for {self.username}: '
                                f'{type(e).__name__}: {e}')

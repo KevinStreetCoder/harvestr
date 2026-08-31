@@ -36,8 +36,12 @@ REM So ask the app to stop all recording first and give ffmpeg a moment to
 REM close its files cleanly. Best-effort: if the API doesn't answer we still
 REM fall through to the kill below.
 echo   asking recorders to stop cleanly...
+REM prepare_shutdown, NOT toggle_all: toggle_all also PERSISTS running:false
+REM for every model, so the next start restored 1551 models as stopped and
+REM recorded nothing until someone pressed Start all. This drains in memory
+REM and leaves the saved state describing what should be running.
 powershell -NoProfile -Command ^
-  "try { Invoke-RestMethod -Uri 'http://127.0.0.1:%PORT%/api/live/toggle_all' -Method Post -ContentType 'application/json' -Body '{\"running\":false}' -TimeoutSec 120 | Out-Null } catch { }" >nul 2>&1
+  "try { Invoke-RestMethod -Uri 'http://127.0.0.1:%PORT%/api/live/prepare_shutdown' -Method Post -TimeoutSec 180 | Out-Null } catch { }" >nul 2>&1
 
 REM Wait for ffmpeg to drain (up to ~30s), rather than a blind fixed sleep.
 for /L %%i in (1,1,15) do (

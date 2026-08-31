@@ -6,7 +6,7 @@ import requests
 from typing import Optional, Set
 from streamonitor.bot import Bot
 from streamonitor.enums import Status, Gender
-from streamonitor.downloaders.hls import getVideoNativeHLS
+from streamonitor.downloaders.hls import getVideoNativeHLS, _abs_with_parent_query
 from streamonitor.downloaders.ffmpeg import getVideoFfmpeg
 
 
@@ -144,6 +144,11 @@ class Chaturbate(Bot):
         """Split CB's llhls master into (video_chunklist, audio_rendition).
 
         Returned as a tuple so the downloader can give ffmpeg two inputs.
+
+        Child URLs must INHERIT the master's query string: the chunklist URIs
+        carry their own ?session=..., while the auth ?token=... lives only on
+        the master. A plain urljoin drops the token and every segment request
+        then 403s.
         Falls back to the master URL unchanged if anything is unexpected --
         video-only beats no recording.
         """
@@ -159,12 +164,12 @@ class Chaturbate(Bot):
         audio = {}
         for md in getattr(master, "media", []) or []:
             if md.type == "AUDIO" and md.uri:
-                audio[md.group_id] = urljoin(master_url, md.uri)
+                audio[md.group_id] = _abs_with_parent_query(master_url, md.uri)
         best, best_bw, grp = None, -1, None
         for pl in getattr(master, "playlists", []) or []:
             bw = getattr(pl.stream_info, "bandwidth", 0) or 0
             if bw > best_bw:
-                best, best_bw = urljoin(master_url, pl.uri), bw
+                best, best_bw = _abs_with_parent_query(master_url, pl.uri), bw
                 grp = getattr(pl.stream_info, "audio", None)
         if not best:
             return master_url

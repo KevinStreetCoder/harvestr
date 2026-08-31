@@ -244,7 +244,22 @@ def getVideoFfmpeg(self: 'Bot', url, filename: str) -> bool:
         if FFSettings.USE_PROGRESS_FORCED_STATS:
             cmd.extend(['-progress', 'pipe:2', '-stats_period', '5'])
         
-        _input_opts = list(cmd[1:])  # everything before -i is per-input
+        # Options that legitimately apply PER INPUT, so they can be repeated
+        # for a second -i. Deliberately NOT cmd[1:]: that also caught the
+        # global flags (-hide_banner, -loglevel, -progress), and repeating
+        # those after -i made the command malformed so ffmpeg wrote nothing.
+        _GLOBAL_ONLY = {"-hide_banner", "-loglevel", "-progress",
+                        "-stats_period", "-re"}
+        _input_opts, _skip = [], False
+        for _i, _tok in enumerate(cmd[1:]):
+            if _skip:
+                _skip = False
+                continue
+            if _tok in _GLOBAL_ONLY:
+                # -hide_banner and -re are bare; the rest take a value.
+                _skip = _tok not in ("-hide_banner", "-re")
+                continue
+            _input_opts.append(_tok)
         # Input(s). A (video_url, audio_url) tuple means the site split audio
         # into its own rendition: pass them as TWO inputs so each carries its
         # own -user_agent/-headers. ffmpeg does not apply those options when it

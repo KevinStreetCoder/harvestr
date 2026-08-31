@@ -1179,29 +1179,44 @@ class LiveManager:
         # time and the "site is off" promise stops being true.
         if not self.site_enabled(site):
             return {"ok": False, "skipped": "site_disabled", "site": site}
+        # Lock ONLY to read the entry. Constructing a bot hits the network
+        # (StripChat resolves a room id and pulls static config), and
+        # bot.restart() can join a thread -- doing either under the manager
+        # lock serialises the whole fleet behind network latency, because the
+        # snapshot builder, bulk poller, rename sync and every start_model call
+        # contend for that same lock. Measured effect: "start all" advanced at
+        # ~6 models/min, i.e. ~2.5 h for 1554 models.
         with self._lock:
             rm = self._models.get(key)
             if not rm:
                 raise LookupError(f"no such model {key}")
             bot = rm.bot
-            # Fresh-instantiate if the previous thread has already exited —
-            # Thread objects in Python can only be started once.
-            if not bot.is_alive() and getattr(bot, "running", False) is False:
-                site_cls = SITES.get(rm.site)
-                if site_cls:
-                    try:
-                        if RoomIdBot and issubclass(site_cls, RoomIdBot):
-                            bot = site_cls(rm.username, room_id=rm.room_id)
-                        else:
-                            bot = site_cls(rm.username)
-                        rm.bot = bot
-                    except Exception as e:
-                        log.debug(f"  [live] re-instantiate {key}: {e}")
-            try:
-                bot.restart()    # StreaMonitor convention: sets self.running=True,
-                                 # spawns or resumes thread
-            except Exception as e:
-                log.warning(f"  [live] start {key}: {e}")
+            site_name, username, room_id = rm.site, rm.username, rm.room_id
+
+        # Fresh-instantiate if the previous thread already exited -- a Thread
+        # object can only be started once. Done OUTSIDE the lock.
+        if not bot.is_alive() and getattr(bot, "running", False) is False:
+            site_cls = SITES.get(site_name)
+            if site_cls:
+                try:
+                    if RoomIdBot and issubclass(site_cls, RoomIdBot):
+                        new_bot = site_cls(username, room_id=room_id)
+                    else:
+                        new_bot = site_cls(username)
+                    # Re-check under the lock: the entry may have been removed
+                    # or replaced while we were building this one.
+                    with self._lock:
+                        cur = self._models.get(key)
+                        if cur is not None and cur.bot is bot:
+                            cur.bot = new_bot
+                            bot = new_bot
+                except Exception as e:
+                    log.debug(f"  [live] re-instantiate {key}: {e}")
+        try:
+            bot.restart()    # StreaMonitor convention: sets self.running=True,
+                             # spawns or resumes thread
+        except Exception as e:
+            log.warning(f"  [live] start {key}: {e}")
         if _save:
             self._save()
         return {"ok": True}

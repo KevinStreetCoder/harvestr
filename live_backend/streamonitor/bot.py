@@ -1073,13 +1073,13 @@ class Bot(Thread):
                             self.recording = False
                             self._consec_dl_fail = 0
                             self.log('Recording ended')
-                            try:
-                                from parameters import KEEP_LAST_N
-                                if KEEP_LAST_N > 0:
-                                    self._prune_old_recordings(KEEP_LAST_N,
-                                                               protect=file)
-                            except Exception as e:
-                                self.logger.debug(f"prune skipped: {e}")
+                            # NO automatic pruning. Retention is handled by a
+                            # separate script outside the recorder. A recorder
+                            # that deletes its own output on every completed
+                            # capture is one bug away from destroying the
+                            # library it just built. _prune_old_recordings
+                            # stays available for an explicit, deliberate call;
+                            # nothing invokes it automatically.
                             try:
                                 self.cache_file_list()
                             except Exception as e:
@@ -1398,7 +1398,8 @@ class Bot(Thread):
     # partial temp artefacts we don't recognise.
     _PRUNABLE_EXT = (".ts", ".mkv", ".mp4")
 
-    def _prune_old_recordings(self, keep: int, protect: str = "") -> int:
+    def _prune_old_recordings(self, keep: int, protect: str = "",
+                              confirm: bool = False) -> int:
         """Delete all but the `keep` newest recordings in this model's folder.
 
         This DELETES user data, so it is deliberately conservative:
@@ -1408,7 +1409,23 @@ class Bot(Thread):
             modified in the last 60s, so an in-flight capture is safe
           * a failure to delete one file never aborts the rest
         """
+        # DELETES RECORDINGS. Three hard gates, because losing captures is
+        # worse than any amount of disk pressure:
+        #
+        #   1. confirm=True must be passed explicitly. Nothing in the recorder
+        #      calls this automatically -- retention is a separate, external
+        #      script that the user runs deliberately.
+        #   2. Never while this model is recording. Deleting from a folder an
+        #      ffmpeg process is writing into risks taking the in-flight file.
+        #   3. keep must be > 0. keep=0 means "keep everything", never "delete
+        #      everything" -- an off-by-one there would wipe the library.
+        if not confirm:
+            self.logger.debug("prune refused: confirm=False (must be explicit)")
+            return 0
         if keep <= 0:
+            return 0
+        if getattr(self, "recording", False):
+            self.logger.info("prune skipped: this model is recording")
             return 0
         folder = self.outputFolder
         try:

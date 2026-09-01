@@ -1601,8 +1601,18 @@ class LiveManager:
         if pub >= 12 and rec < pub * 0.55:
             lvl = max(lvl, 1); reasons.append(f"{pub - rec} online models not recording")
         online = pub + hist.get("PRIVATE", 0) + rec
-        if err >= 10 and (online == 0 or err > online * 0.2):
-            lvl = max(lvl, 1); reasons.append(f"{err} models in ERROR")
+        # The denominator has to include the ERROR models themselves. A model
+        # the site advertises as live but that never sends data (a "ghost"
+        # stream) flips OUT of `online` and INTO `err`, so it inflates the
+        # numerator and shrinks the denominator at the same time. Measured on
+        # this fleet: 22 ERROR against 85 online read as 26% and tripped the
+        # old 20% rule, while the recorder was completing ~2400 captures a day
+        # -- i.e. it flagged normal ghost-stream churn as system degradation.
+        # Counting them in the base makes the ratio reflect the fleet.
+        claimed_live = online + err
+        if err >= 10 and (claimed_live == 0 or err > claimed_live * 0.3):
+            lvl = max(lvl, 1)
+            reasons.append(f"{err} of {claimed_live} site-live models in ERROR")
         eta = s.get("disk_full_eta_s")
         if eta is not None and eta < 3600:
             lvl = 2; reasons.append("disk fills in under 1h")

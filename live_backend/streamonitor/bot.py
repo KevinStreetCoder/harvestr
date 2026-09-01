@@ -157,6 +157,34 @@ if not VERIFY_SSL:
         UserWarning, stacklevel=2
     )
 
+# +-- Deletion kill-switch ---------------------------------------------------
+# DEFAULT: the recorder deletes NOTHING inside the recordings tree.
+#
+# An automatic retention pass once removed 6,743 files / 453 GB in 25 hours --
+# more than it left behind. Every unlink under a model's output folder now goes
+# through this switch, INCLUDING the "it is only a zero-byte file" cleanups: a
+# 0-byte file costs nothing to keep, and "safe to delete" is precisely the
+# judgement that went wrong before.
+#
+# Set HARVESTR_ALLOW_DELETES=1 to restore the old cleanup behaviour. Scratch
+# outside the recordings tree (M3U8_TMP, rolling playlists, browser profiles)
+# is unaffected -- none of it is a capture.
+ALLOW_RECORDING_DELETES = (
+    os.environ.get("HARVESTR_ALLOW_DELETES", "").strip() == "1")
+
+
+def _may_delete(path, logger=None, why=""):
+    """True only if deleting inside the recordings tree is explicitly enabled."""
+    if ALLOW_RECORDING_DELETES:
+        return True
+    if logger is not None:
+        try:
+            logger.debug(f"delete suppressed ({why or 'no-delete policy'}): {path}")
+        except Exception:
+            pass
+    return False
+
+
 # Global locks for thread-safe operations
 _print_lock = Lock()
 _filename_lock = RLock()  # Reentrant lock for nested filename operations
@@ -783,7 +811,8 @@ class Bot(Thread):
                 self.logger.error(f"Output file is 0 KB or missing: {actual_file}")
                 if os.path.exists(actual_file):
                     try:
-                        os.remove(actual_file)
+                        if _may_delete(actual_file, self.logger, "output file"):
+                            os.remove(actual_file)
                         self.logger.info("Removed zero-byte output file")
                     except Exception as e:
                         self.logger.warning(f"Failed to remove zero-byte file: {e}")
@@ -794,7 +823,8 @@ class Bot(Thread):
                 # Clean up the actual file that was created
                 if os.path.exists(actual_file) and self._is_zero_or_missing(actual_file):
                     try:
-                        os.remove(actual_file)
+                        if _may_delete(actual_file, self.logger, "output file"):
+                            os.remove(actual_file)
                         self.logger.info("Removed failed output file")
                     except Exception as e:
                         self.logger.warning(f"Failed to remove failed output: {e}")
@@ -818,7 +848,8 @@ class Bot(Thread):
                             should_delete = True
                         
                         if should_delete:
-                            os.remove(tmp)
+                            if _may_delete(tmp, self.logger, "junk temp"):
+                                os.remove(tmp)
                             self.logger.debug(f"Cleaned up temp file: {os.path.basename(tmp)}")
                     except Exception as e:
                         self.logger.debug(f"Failed to clean temp file {tmp}: {e}")
@@ -1319,7 +1350,8 @@ class Bot(Thread):
                             p = os.path.join(folder, f)
                             try:
                                 if os.path.getsize(p) == 0:
-                                    os.remove(p)
+                                    if _may_delete(p, self.logger, "zero-byte sweep"):
+                                        os.remove(p)
                                     self.logger.debug(f"Deleted zero-byte file: {f}")
                             except Exception as e:
                                 self.logger.debug(f"Error checking/removing {f}: {e}")
@@ -1349,7 +1381,8 @@ class Bot(Thread):
                                 if os.path.getsize(candidate) > 0:
                                     n += 1
                                     continue
-                                os.remove(candidate)
+                                if _may_delete(candidate, self.logger, "zero-byte slot"):
+                                    os.remove(candidate)
                                 self.logger.debug(f"Removed zero-byte file during numbering: {n}{ext}")
                             except Exception:
                                 n += 1
@@ -1360,7 +1393,8 @@ class Bot(Thread):
                             if os.path.exists(sidecar):
                                 try:
                                     if os.path.getsize(sidecar) == 0:
-                                        os.remove(sidecar)
+                                        if _may_delete(sidecar, self.logger, "zero-byte sidecar"):
+                                            os.remove(sidecar)
                                         self.logger.debug(f"Removed zero-byte sidecar: {os.path.basename(sidecar)}")
                                     else:
                                         blocked = True
@@ -1454,9 +1488,14 @@ class Bot(Thread):
         removed = freed = 0
         for _, p, size in vids[keep:]:
             try:
-                os.remove(p)
-                removed += 1
-                freed += size
+                # Counters INSIDE the guard: they previously incremented even
+                # when the delete was suppressed, so a fully-blocked prune
+                # still logged "Pruned 4 old recording(s), freed N MB" -- a
+                # log that claims data was destroyed when none was.
+                if _may_delete(p, self.logger, "prune old recording"):
+                    os.remove(p)
+                    removed += 1
+                    freed += size
             except OSError as e:
                 self.logger.debug(f"prune: could not remove {p}: {e}")
         if removed:

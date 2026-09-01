@@ -709,7 +709,10 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
         size = os.path.getsize(output_path)
         if size == 0:
             self.logger.error("Output file is empty")
-            os.remove(output_path)
+            # Same no-delete policy as the rest of the recordings tree.
+            from streamonitor.bot import _may_delete
+            if _may_delete(output_path, self.logger, "empty capture"):
+                os.remove(output_path)
             return False
         
         if size < 1024:  # Less than 1KB is suspicious

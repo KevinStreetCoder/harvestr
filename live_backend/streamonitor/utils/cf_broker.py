@@ -257,10 +257,13 @@ async def mint_cookies_dedup(domain: str, visit_urls: Iterable[str], **kwargs) -
     async with lock:
         # A sibling bot may have minted for this domain while we waited on
         # the lock — if so, reuse its fresh cookie from disk (no browser).
+        # (An empty cookie list counts: it's what a successful mint of a
+        # cookie-less host writes. A FAILED mint writes nothing, so its disk
+        # ts stays older than `last` and we fall through and retry.)
         last = _MINT_LAST_TS.get(domain, 0.0)
         if time.time() - last < _MINT_DEDUP_WINDOW:
             disk = read(domain)
-            if disk.get("cookies"):
+            if isinstance(disk.get("cookies"), list) and disk.get("ts", 0) >= int(last) - 1:
                 return disk
         # We're the elected minter for this domain. Cap total live browsers.
         async with _mint_browser_sem():
@@ -294,8 +297,15 @@ async def load_or_mint(
             ts = int(data.get("ts", 0))
             age = int(time.time()) - ts
             
-            # Check if fresh and has cookies
-            if age < max_age and data.get("cookies"):
+            # Fresh is enough -- an EMPTY cookie list included. Only a
+            # successful mint writes this file (failures return without
+            # writing), and JSON/CDN hosts (StreaMate's manifest server, CB
+            # and Bonga edges, ...) legitimately set no cookies. Requiring a
+            # non-empty list re-launched a headless browser for every new
+            # bot session on those hosts: 52 StreaMate bots = 52 serial
+            # browser mints (~50s per first status). A Cloudflare challenge
+            # that shows up later still re-mints via the request path.
+            if age < max_age and isinstance(data.get("cookies"), list):
                 return data
         except (json.JSONDecodeError, ValueError, OSError) as e:
             # Fall through to minting - stale cookies will be refreshed

@@ -183,6 +183,20 @@ class CamSoda(Bot):
         return ("blue", [])
 
     # ──────────────── Core API ────────────────
+    @staticmethod
+    def _isNoSuchUser(r) -> bool:
+        """CamSoda now answers an unknown username with HTTP 404 and
+        {"error": "No username found."} (it used to be a 200). The non-200
+        branch caught it first, so dead accounts read as UNKNOWN and were
+        re-polled every cycle instead of being reported as NOTEXIST."""
+        if r.status_code != 404:
+            return False
+        try:
+            data = r.json()
+        except Exception:
+            return False
+        return isinstance(data, dict) and data.get("error") == "No username found."
+
     @classmethod
     def getStatusBulk(cls, streamers):
         """
@@ -231,6 +245,11 @@ class CamSoda(Bot):
 
                 consecutive_429 = 0
 
+                if cls._isNoSuchUser(r):
+                    streamer.setStatus(Status.NOTEXIST)
+                    time.sleep(0.5)
+                    continue
+
                 if r.status_code != 200:
                     streamer.setStatus(Status.UNKNOWN)
                     time.sleep(0.5)
@@ -272,6 +291,8 @@ class CamSoda(Bot):
 
             if response.status_code in (403, 429):
                 return {"__status__": Status.RATELIMIT}
+            elif self._isNoSuchUser(response):
+                return {"error": "No username found."}
             elif response.status_code != 200:
                 self.logger.warning(f"HTTP {response.status_code} for user {self.username}")
                 return {"__status__": Status.UNKNOWN}

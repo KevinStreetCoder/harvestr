@@ -3813,7 +3813,9 @@ function _liveApplyMonitor(s) {
 }
 async function pollVpnStatus() {
   try {
-    const r = await fetch('/api/live/vpnstatus'); if (!r.ok) return;
+    // A failed poll (503 while the fleet boots) mustn't count as fresh, or the
+    // panel sits on its "–" placeholder for the full 30s interval.
+    const r = await fetch('/api/live/vpnstatus'); if (!r.ok) { window._lastVpnPoll = 0; return; }
     const v = await r.json(), el = document.getElementById('mon-vpn'); if (!el) return;
     if (!v.configured && !v.exit_ip) { el.innerHTML = '<span class="muted">VPN not detected</span>'; return; }
     const flag = v.country ? _countryFlag(v.country) : '';
@@ -3892,7 +3894,11 @@ async function liveSummaryRefresh() {
     window._liveWriteBps = s.download_bps_avg || 0;
     _liveApplyStats(s);
     // VPN exit panel: poll its own endpoint at most every 30s (external IP lookup).
-    if (Date.now() - (window._lastVpnPoll || 0) > 30000) { window._lastVpnPoll = Date.now(); pollVpnStatus(); }
+    // Only while the panel is on screen: a poll made from the Archive tab found
+    // no panel to fill yet still reset the timer, leaving "–" on switching over.
+    const _vpnEl = document.getElementById('mon-vpn');
+    if (_vpnEl && _vpnEl.offsetParent !== null
+        && Date.now() - (window._lastVpnPoll || 0) > 30000) { window._lastVpnPoll = Date.now(); pollVpnStatus(); }
     // Refresh cards immediately on STRUCTURAL changes (model added/removed or
     // started/stopped polling). Deliberately excludes the recording count,
     // which flickers constantly at scale and would force a full re-render every

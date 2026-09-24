@@ -99,6 +99,7 @@ def reload() -> None:
     with _lock:
         _cfg = None
         _cli = None
+        _probe_cache.clear()
     # Also drop the exit-info cache. It carries `enabled` and lives 30s, so
     # without this a settings change (e.g. the dashboard rotation toggle) is
     # applied but the UI keeps reporting the OLD value for up to half a minute
@@ -138,9 +139,86 @@ def _find_cli() -> Optional[str]:
 
 
 def configured() -> bool:
-    """Rotation is set up: enabled, has locations, and the CLI is present."""
+    """Rotation is set up AND safe to run: enabled, has locations, the CLI is
+    present, the Mullvad account is still paid, and no other VPN owns the
+    tunnel. The last two matter because `mullvad connect` on an expired
+    account parks the daemon in its blocked error state (no traffic at all),
+    and connecting over another VPN (IVPN) stacks two tunnels."""
     cfg = _load_cfg()
-    return bool(cfg.get("enabled") and cfg.get("rotate_locations") and _find_cli())
+    if not (cfg.get("enabled") and cfg.get("rotate_locations") and _find_cli()):
+        return False
+    return not _mullvad_expired() and _other_vpn() is None
+
+
+# ── safety probes (cached: configured() runs on every RATELIMIT report) ────
+_probe_cache: Dict[str, tuple] = {}
+
+
+def _cached(key: str, ttl: float, fn):
+    now = time.monotonic()
+    hit = _probe_cache.get(key)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    try:
+        val = fn()
+    except Exception:
+        val = None
+    _probe_cache[key] = (now, val)
+    return val
+
+
+def _mullvad_expired() -> bool:
+    """True when `mullvad account get` shows an expiry in the past."""
+    def probe():
+        import re as _re
+        from datetime import datetime, timezone
+        r = _run(["account", "get"], timeout=15)
+        m = _re.search(r"Expires at:\s*(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\s*([+-]\d\d:\d\d)?",
+                       (r.stdout or "") if r else "")
+        if not m:
+            return False                      # unknown -> don't block rotation
+        ts = datetime.fromisoformat(m.group(1) + (m.group(2) or "+00:00"))
+        return ts < datetime.now(timezone.utc)
+    return bool(_cached("mullvad_expired", 600, probe))
+
+
+def _ivpn_cli() -> Optional[str]:
+    for c in (os.environ.get("IVPN_CLI"), shutil.which("ivpn"),
+              r"C:\Program Files\IVPN Client\cli\ivpn.exe",
+              "/usr/bin/ivpn", "/usr/local/bin/ivpn",
+              "/Applications/IVPN.app/Contents/MacOS/cli/ivpn"):
+        if c and os.path.exists(c):
+            return c
+    return None
+
+
+def _ivpn_status() -> Optional[dict]:
+    """{"connected", "relay", "country"} from `ivpn status`, or None."""
+    def probe():
+        import re as _re
+        cli = _ivpn_cli()
+        if not cli:
+            return None
+        out = subprocess.run([cli, "status"], capture_output=True, text=True,
+                             timeout=15).stdout or ""
+        st = _re.search(r"^VPN\s*:\s*(\w+)", out, _re.M)
+        if not st:
+            return None
+        relay = _re.search(r"\[([\w.-]+)\]", out)
+        cc = _re.search(r"\(([A-Z]{2})\)", out)
+        return {"connected": st.group(1).upper() == "CONNECTED",
+                "state": st.group(1).upper(),
+                "relay": relay.group(1) if relay else None,
+                "country": cc.group(1) if cc else None}
+    return _cached("ivpn_status", 20, probe)
+
+
+def _other_vpn() -> Optional[str]:
+    """Name of a non-Mullvad VPN that is up (so Mullvad must stay out)."""
+    iv = _ivpn_status()
+    if iv and iv.get("state") in ("CONNECTED", "CONNECTING"):
+        return "IVPN"
+    return None
 
 
 def _run(args: List[str], timeout: int = 30):
@@ -184,12 +262,24 @@ def exit_info() -> dict:
     except Exception:
         pass
     locs = cfg.get("rotate_locations") or []
+    provider = "Mullvad" if connected else None
+    country = relay.split("-")[0].upper() if relay else None
+    if not connected:
+        # Not on Mullvad: report the VPN that IS up, so the panel doesn't show
+        # a healthy IVPN tunnel as "reconnecting".
+        iv = _ivpn_status()
+        if iv and iv.get("state") in ("CONNECTED", "CONNECTING"):
+            provider, connected = "IVPN", bool(iv.get("connected"))
+            relay, country = iv.get("relay"), iv.get("country")
     data = {
         "configured": configured(),
         "enabled": bool(cfg.get("enabled")),
+        "provider": provider,
+        "other_vpn": _other_vpn(),
+        "account_expired": bool(_find_cli()) and _mullvad_expired(),
         "connected": connected,
         "relay": relay,
-        "country": (relay.split("-")[0].upper() if relay else None),
+        "country": country,
         "exit_ip": ip,
         "locations": locs,
         "next_location": (locs[_rotate_idx % len(locs)] if locs else None),

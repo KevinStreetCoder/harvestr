@@ -3821,12 +3821,14 @@ async function pollVpnStatus() {
     // "armed" needs BOTH the switch on and a usable CLI+locations; say which
     // is missing rather than a bare "off" the user can't act on.
     const rot = !on ? 'rotation OFF'
+              : v.account_expired ? 'rotation paused · Mullvad account expired'
+              : v.other_vpn ? ('rotation paused · ' + v.other_vpn + ' is the active VPN')
               : (v.configured ? ('rotation armed · ' + (v.locations || []).join('/'))
                               : 'rotation on, but Mullvad CLI/locations missing');
     const last = (v.last_rotate_ago_s != null) ? ('last rotate ' + durHuman(v.last_rotate_ago_s) + ' ago') : 'no rotations yet';
     el.innerHTML =
-      `<div><b>${flag} ${v.country || '?'}</b> <span class="muted">${escapeHtml(v.relay || '')}</span></div>` +
-      `<div>${escapeHtml(v.exit_ip || '–')} <span class="muted">${v.connected ? 'connected' : 'reconnecting'}</span></div>` +
+      `<div><b>${flag} ${v.country || '?'}</b> <span class="muted">${escapeHtml([v.provider, v.relay].filter(Boolean).join(' · '))}</span></div>` +
+      `<div>${escapeHtml(v.exit_ip || '–')} <span class="muted">${v.connected ? 'connected' : (v.provider ? 'reconnecting' : 'no VPN')}</span></div>` +
       `<div class="vpn-rot-row">` +
         `<button class="vpn-toggle ${on ? 'on' : 'off'}" id="vpn-rot-toggle"` +
         ` role="switch" aria-checked="${on}"` +

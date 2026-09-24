@@ -16,7 +16,7 @@ from urllib3.util.retry import Retry
 from streamonitor.bot import RoomIdBot
 from streamonitor.downloaders.hls import getVideoNativeHLS
 from streamonitor.enums import Status, Gender
-from streamonitor.utils.CloudflareDetection import looks_like_cf_html
+from streamonitor.utils.CloudflareDetection import looks_like_cf_html, looks_like_cf_block
 
 
 class StripChat(RoomIdBot):
@@ -34,10 +34,24 @@ class StripChat(RoomIdBot):
     _static_data = None
     _main_js_data = None
     _doppio_js_data = None
+    # pkey -> pdkey. StripChat rotated to v2 keys in Sept 2026 (upstream #372:
+    # live masters now carry 1Dzcc6OjP73LKbtI / 7uUnbD0jMCB9GH32 /
+    # Fq6m2TO2ZeBkRPm9); without them every capture fails with "No mouflon
+    # pkey". Set from the community list (github.com/kesamom/stripchat_mouflon,
+    # also shipped in upstream PR #371). Keys learned at runtime from the Doppio
+    # JS are added on top and persisted to stripchat_mouflon_keys.json.
     _mouflon_keys: dict = {
         "Zeechoej4aleeshi": "ubahjae7goPoodi6",
         "Zokee2OhPh9kugh4": "Quean4cai9boJa5a",
         "Ook7quaiNgiyuhai": "EQueeGh2kaewa3ch",
+        "Fq6m2TO2ZeBkRPm9": "xb6di1NF9EFXHUwb",
+        "GrRncsoByZmsiT6L": "NigHYyOD9l4rvAEb",
+        "1Dzcc6OjP73LKbtI": "Y64UVwX5RrIWnOLp",
+        "N2oLovTIXb0o28Uj": "ABE7Sj8jh3oPM2ae",
+        "NTK9aqcLmNFMWrpQ": "tOcYOap4Ty1l9Jzb",
+        "7uUnbD0jMCB9GH32": "lzCQ6QBTnLpB0zMF",
+        "Ohi7eTRBpkAuML0l": "kExe29N2sLFrHGqu",
+        "OLzu7QlySkG2fVRn": "CsovScFH9VirSJ4Z",
     }
     _session = None
 
@@ -55,7 +69,7 @@ class StripChat(RoomIdBot):
     _MOUFLON_FILE_ATTR = "#EXT-X-MOUFLON:FILE:"
     _MOUFLON_URI_ATTR = "#EXT-X-MOUFLON:URI:"
     _MOUFLON_FILENAME = "media.mp4"
-    _CDN_DOMAINS = ("org", "com", "net")
+    _CDN_DOMAINS = ("org", "com", "net", "media")
     _CHARSET = "abcdefghijklmnopqrstuvwxyz0123456789"
     
     # Status sets for O(1) lookup
@@ -668,6 +682,65 @@ class StripChat(RoomIdBot):
             pass
         return None
 
+    # Bulk status (upstream PR #371). One request answers up to _LIST_CHUNK
+    # models, and -- unlike the per-model /api/front/v2/models/{id}[/cam]
+    # endpoints -- it is not behind StripChat's Cloudflare WAF block, which
+    # refuses VPN/datacenter exits outright (measured 2026-09-24 on an IVPN
+    # exit: /cam 403 for every client and TLS fingerprint; models/list 200).
+    _LIST_URL = 'https://stripchat.com/api/front/models/list'
+    _LIST_CHUNK = 50
+
+    @classmethod
+    def _fetchModelsList(cls, session, headers, ids, logger=None):
+        """{model_id: entry} for up to _LIST_CHUNK ids, or None if the call failed.
+
+        Ids the endpoint doesn't return are simply absent from the dict.
+        """
+        q = '&'.join(f'modelIds[]={i}' for i in ids)
+        try:
+            r = session.get(f'{cls._LIST_URL}?{q}', headers=headers, bucket='api')
+        except Exception as e:
+            if logger:
+                logger.debug(f'models/list failed: {type(e).__name__}: {e}')
+            return None
+        if r.status_code != 200:
+            if logger:
+                logger.debug(f'models/list HTTP {r.status_code}')
+            return None
+        try:
+            models = (r.json() or {}).get('models') or []
+        except Exception:
+            return None
+        return {str(m['id']): m for m in models if isinstance(m, dict) and m.get('id')}
+
+    def _statusFromListEntry(self, entry):
+        """Map one models/list entry (None = not returned) to a Status."""
+        if entry is None:
+            # Not returned: the account is deleted, disabled/banned, or hidden
+            # from this exit's country (sampled: their model pages 404). None of
+            # those can be recorded from here. OFFLINE keeps the model tracked;
+            # NOTEXIST would stop the bot for good over an API omission.
+            return Status.OFFLINE
+        # The id is stable across renames, so a different username IS the
+        # rename (upstream 1fe1fbe/68a9c8b). Case-only differences are not.
+        new_name = (entry.get('username') or '').strip()
+        if (new_name and new_name.lower() != self.username.lower()
+                and not self._rename_in_progress):
+            self.logger.info(f"Model renamed on StripChat: {self.username} -> {new_name}")
+            self.setUsername(new_name, move_folder=True)
+        self.lastInfo = entry
+        status = entry.get('status')
+        if status == 'public':
+            # isLive False = public but not broadcasting (paused / between
+            # streams): the master 404s, so waiting is right (see getStatus).
+            return Status.PUBLIC if entry.get('isLive') else Status.OFFLINE
+        if status in self._PRIVATE_STATUSES:
+            return Status.PRIVATE
+        if status in self._OFFLINE_STATUSES:
+            return Status.OFFLINE
+        self.logger.debug(f"Unknown list status {status!r} for {self.username}")
+        return Status.UNKNOWN
+
     @classmethod
     def getStatusBulk(cls, streamers):
         """Bulk status check for all StripChat streamers.
@@ -703,18 +776,33 @@ class StripChat(RoomIdBot):
         700+ models (vs. 15689 for Streamate where bulk works).
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        # Per-streamer status check, parallelized. Max 8 concurrent —
-        # the global semaphore at 32 covers ALL sites so we leave
-        # headroom for CB/CamSoda/etc. running concurrently.
-        active: list = []
-        for streamer in streamers:
-            # Quick optimization: if a streamer is already PUBLIC or
-            # RESTRICTED (already recording / about to record), skip
-            # the status probe — the running recording loop handles
-            # transitions on its own.
-            if streamer.sc in (Status.PUBLIC, Status.RESTRICTED):
+        # Skip PUBLIC only: the recording loop owns those transitions. This
+        # used to skip RESTRICTED too, and since SC bots never self-poll, a
+        # model once marked RESTRICTED (e.g. by a transient Cloudflare 403)
+        # was never polled again -- stuck until restart.
+        active = [s for s in streamers if s.sc != Status.PUBLIC]
+        if not active:
+            return
+
+        # Primary: models/list, _LIST_CHUNK models per request. Anything it
+        # can't answer (no room_id yet, or the chunk's request failed) falls
+        # through to the per-model probes below.
+        leftover = [s for s in active if not s.room_id]
+        with_id = [s for s in active if s.room_id]
+        for i in range(0, len(with_id), cls._LIST_CHUNK):
+            chunk = with_id[i:i + cls._LIST_CHUNK]
+            head = chunk[0]
+            found = cls._fetchModelsList(head.session, head.headers,
+                                         [s.room_id for s in chunk], head.logger)
+            if found is None:
+                leftover.extend(chunk)
                 continue
-            active.append(streamer)
+            for s in chunk:
+                try:
+                    s.setStatus(s._statusFromListEntry(found.get(str(s.room_id))))
+                except Exception as e:
+                    s.logger.debug(f"list status apply failed: {type(e).__name__}: {e}")
+        active = leftover
         if not active:
             return
 
@@ -875,18 +963,23 @@ class StripChat(RoomIdBot):
         return '\n'.join(decoded)
 
     @classmethod
-    @lru_cache(maxsize=128)
     def getMouflonDecKey(cls, pkey: str) -> Optional[str]:
+        # Not lru_cached: that memoised MISSES too, so a pkey first seen before
+        # its key was known stayed undecodable until restart. It's a dict hit.
         if pkey in cls._mouflon_keys:
             return cls._mouflon_keys[pkey]
-        
+
+        # _doppio_js_data is None when the Doppio JS scrape failed at startup;
+        # an unknown pkey must be a clean miss then, not an AttributeError that
+        # takes the whole playlist fetch down.
+        js = cls._doppio_js_data or ""
         pattern = f'"{pkey}:'
-        idx = cls._doppio_js_data.find(pattern)
+        idx = js.find(pattern)
         if idx != -1:
             start = idx + len(pattern)
-            end = cls._doppio_js_data.find('"', start)
+            end = js.find('"', start)
             if end != -1:
-                key = cls._doppio_js_data[start:end]
+                key = js[start:end]
                 cls._mouflon_keys[pkey] = key
                 # Persist newly-discovered keys so a StripChat key rotation
                 # (upstream issue #359 "pkey has changed again") survives
@@ -1220,6 +1313,13 @@ class StripChat(RoomIdBot):
             return Status.NOTEXIST
         if not self.room_id:
             self.room_id = str(model_id)
+        # Same source as getStatusBulk, so a single poll and the bulk poller
+        # can't disagree (and flap) about one model. The per-model /cam call
+        # below is the fallback for when models/list itself is unreachable.
+        listed = self._fetchModelsList(self.session, self.headers, [model_id],
+                                       self.logger)
+        if listed is not None:
+            return self._statusFromListEntry(listed.get(str(model_id)))
         url = (f'https://stripchat.com/api/front/v2/models/{model_id}/cam'
                f'?uniq={StripChat.uniq()}')
         try:
@@ -1260,6 +1360,18 @@ class StripChat(RoomIdBot):
             if looks_like_cf_html(body):
                 self.logger.error(f'Cloudflare challenge (403) for {self.username}')
                 return Status.CLOUDFLARE
+            if looks_like_cf_block(body):
+                # WAF block page, not a geo-restriction: StripChat refuses this
+                # exit IP / client on the per-model API. Was RESTRICTED, which
+                # parked 101 of 120 models as "geo-blocked". Back off instead.
+                if not getattr(StripChat, '_warned_waf', False):
+                    StripChat._warned_waf = True
+                    self.logger.error(
+                        'StripChat Cloudflare WAF is blocking the per-model status '
+                        'API from this exit IP (HTTP 403 block page) - backing off')
+                else:
+                    self.logger.debug('still WAF-blocked (HTTP 403)')
+                return Status.RATELIMIT
             return Status.RESTRICTED
         if r.status_code == 429:
             self.logger.error(f'Rate limited (429) for {self.username}')
@@ -1422,7 +1534,8 @@ class StripChat(RoomIdBot):
                 return []
         
         # Build playlist URL - try multiple CDN hosts (matching upstream's known hosts)
-        cdn_hosts = ['doppiocdn.org', 'doppiocdn.com', 'doppiocdn.net']
+        # .media is what StripChat's own web player uses now (upstream #371).
+        cdn_hosts = ['doppiocdn.org', 'doppiocdn.com', 'doppiocdn.net', 'doppiocdn.media']
         random.shuffle(cdn_hosts)
         
         vr_suffix = '_vr' if self.vr else ''

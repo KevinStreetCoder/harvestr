@@ -26,7 +26,8 @@ from .cf_broker import load_or_mint, mint_cookies_for, mint_cookies_dedup, write
 from .CloudflareDetection import looks_like_cf_html
 
 
-CDN_HOSTS = {"doppiocdn.com", "doppiocdn.org", "doppiocdn.net"}  # Stripchat HLS
+CDN_HOSTS = {"doppiocdn.com", "doppiocdn.org", "doppiocdn.net",
+             "doppiocdn.media"}  # Stripchat HLS
 
 
 def _is_cf_html_block(resp) -> bool:
@@ -408,6 +409,7 @@ class CFSessionManager:
             "doppiocdn.com": ["https://stripchat.com/"],
             "doppiocdn.org": ["https://stripchat.com/"],
             "doppiocdn.net": ["https://stripchat.com/"],
+            "doppiocdn.media": ["https://stripchat.com/"],
         }
 
     async def _ensure_host(self, domain: str, bucket: str) -> _HostState:

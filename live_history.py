@@ -64,6 +64,7 @@ class LiveHistory:
         self._data: Dict[str, Any] = {"models": {}, "updated_at": _iso(_now())}
         self._last_status: Dict[str, str] = {}   # key -> last recorded status
         self._lock = threading.Lock()
+        self._flush_lock = threading.Lock()   # one rewrite at a time
         # Memoized snapshot() results. _compute_metrics is O(|transitions|) and
         # get_snapshot() calls snapshot() per-model across 1000+ models on every
         # /api/live/status poll -- an un-cached recompute that timed out the
@@ -72,6 +73,7 @@ class LiveHistory:
         # wall-clock-relative fields. key -> (n, last_ts, mono_ts, result).
         self._snap_cache: Dict[str, tuple] = {}
         self._last_flush = 0.0
+        self._dirty = False                   # transitions not yet on disk
         self._load()
 
     def _load(self) -> None:
@@ -85,22 +87,91 @@ class LiveHistory:
             for key, entry in self._data["models"].items():
                 txs = entry.get("transitions") or []
                 if txs:
-                    self._last_status[key] = txs[-1].get("to", "")
+                    to = txs[-1].get("to", "")
+                    self._last_status[key] = "OFFLINE" if to == "LONG_OFFLINE" else to
         except Exception:
             self._data = {"models": {}, "updated_at": _iso(_now())}
 
-    def _flush(self) -> None:
-        self._data["updated_at"] = _iso(_now())
+    def flush_now(self) -> bool:
+        """Write everything recorded so far, waiting for an in-flight rewrite
+        instead of skipping. Called from the shutdown drain: the process is
+        then killed with taskkill /F, so an atexit handler would never run.
+        Returns False if the file could not be written."""
+        return self._flush(wait=True)
+
+    def _flush(self, wait: bool = False) -> bool:
+        # Single-flight. A full rewrite took 12-16 s under load, and with the
+        # old 2 s throttle 1-3 of them were always running: ~6 MB/s written to
+        # C: (180 GB in one 8.7 h run) for a file that changes by a few KB.
+        if not self._flush_lock.acquire(blocking=wait):
+            return False
+        tmp = None
+        ok = False
         try:
+            # Consistent snapshot in ~20 ms. Transition dicts are never changed
+            # after they are appended, so copying the lists and meta dicts is
+            # enough. The old dump ran outside the lock; a record() on another
+            # thread could change a dict mid-dump and abort it, leaving a
+            # truncated temp file behind.
+            with self._lock:
+                self._dirty = False
+                self._data["updated_at"] = _iso(_now())
+                models = {k: {**e,
+                              "transitions": list(e.get("transitions") or []),
+                              "meta": dict(e.get("meta") or {})}
+                          for k, e in (self._data.get("models") or {}).items()}
+                top = {k: v for k, v in self._data.items() if k != "models"}
+            # Encode model by model with the C encoder: ~0.3 s CPU for 25 MB and
+            # the GIL is released between entries (json.dump(fp) is the
+            # pure-Python encoder, ~2.7 s; one json.dumps of the whole file holds
+            # the GIL ~0.5 s and freezes every capture thread meanwhile).
+            enc = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
             fd, tmp = tempfile.mkstemp(
                 dir=str(self.path.parent),
                 prefix="._live_history.", suffix=".tmp",
             )
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(self._data, f, ensure_ascii=False, separators=(",", ":"))
+            # errors="replace": a lone surrogate in some meta string must not make
+            # every future flush fail.
+            with os.fdopen(fd, "w", encoding="utf-8", errors="replace",
+                           buffering=1 << 20) as f:
+                f.write('{"models":{')
+                n = 0
+                for k, e in models.items():
+                    try:
+                        blob = enc.encode(k) + ":" + enc.encode(e)
+                    except (TypeError, ValueError, OverflowError):
+                        # One unencodable meta value (e.g. a set) used to fail
+                        # every flush from then on; skip just that model on disk
+                        # (it stays in memory).
+                        continue
+                    if n:
+                        f.write(",")
+                    f.write(blob)
+                    n += 1
+                f.write("}")
+                for k, v in top.items():
+                    f.write(",")
+                    f.write(enc.encode(k))
+                    f.write(":")
+                    f.write(enc.encode(v))
+                f.write("}")
             os.replace(tmp, self.path)
+            tmp = None          # published; nothing left to clean up
+            ok = True
         except Exception:
-            pass
+            self._dirty = True  # retry on the next due record()
+        finally:
+            # A failed rewrite (os.replace -> WinError 5 while another process
+            # has the history file open, or an encode error) would otherwise
+            # leave a full-size ._live_history.*.tmp in downloads\ every time.
+            # This is this call's own scratch file on C:, not a recording.
+            if tmp is not None:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+            self._flush_lock.release()
+        return ok
 
     def _trim_old(self, entry: Dict[str, Any]) -> None:
         """Drop transitions older than KEEP_DAYS days."""
@@ -113,39 +184,50 @@ class LiveHistory:
 
     def record(self, key: str, status: str,
                 meta: Optional[Dict[str, Any]] = None) -> None:
-        """Record a poll result for `key` (username|site). Only writes
-        to disk on actual state transitions — a steady stream of
-        "same as last" polls is free."""
+        """Record a poll result for `key` (username|site). Only a state
+        transition is appended; the file is rewritten at most every 30 s, and
+        only while transitions are pending (a no-change poll can trigger that
+        pending write)."""
+        # OFFLINE vs LONG_OFFLINE is poll cadence, not an online/offline change.
+        # Bulk polls flipped between them every cycle: 317k of 382k stored
+        # transitions, and last_offline_ts kept pointing at the latest flip.
+        if status == "LONG_OFFLINE":
+            status = "OFFLINE"
         with self._lock:
             prev = self._last_status.get(key)
-            # No change: still update meta sidecar but don't append event
             if prev == status:
+                # No change: still update the meta sidecar, append nothing.
                 if meta:
                     self._update_meta_locked(key, meta)
+            else:
+                # State transition — append an event
+                entry = self._data["models"].setdefault(key, {
+                    "transitions": [],
+                    "meta": {},
+                })
+                entry["transitions"].append({
+                    "ts": _iso(_now()),
+                    "from": prev or "",
+                    "to": status,
+                })
+                self._trim_old(entry)
+                if meta:
+                    entry["meta"].update({k: v for k, v in meta.items() if v not in (None, "")})
+                self._last_status[key] = status
+                self._dirty = True
+            if not self._dirty:
                 return
-            # State transition — append an event
-            entry = self._data["models"].setdefault(key, {
-                "transitions": [],
-                "meta": {},
-            })
-            entry["transitions"].append({
-                "ts": _iso(_now()),
-                "from": prev or "",
-                "to": status,
-            })
-            self._trim_old(entry)
-            if meta:
-                entry["meta"].update({k: v for k, v in meta.items() if v not in (None, "")})
-            self._last_status[key] = status
         # Throttle disk flushes. get_snapshot() calls record() per model on
         # every poll; during a status storm (boot, when 1000+ models transition
         # NOTRUNNING->online at once) an fsync of the whole JSON per transition
-        # serialized get_snapshot into a >45s /api/live/status timeout. Flush at
-        # most ~every 2s -- the in-memory log stays current, only the on-disk
-        # copy lags briefly (fine for a history sidecar).
+        # serialized get_snapshot into a >45s /api/live/status timeout. The
+        # in-memory log stays current; only the on-disk copy lags.
+        # (30 s, not 2 s: see _flush.) Any record() call -- a no-change poll
+        # included -- persists pending transitions once 30 s have passed, so a
+        # hard kill loses at most ~30 s plus one snapshot-build interval.
         import time as _t
         now = _t.monotonic()
-        if now - self._last_flush >= 2.0:
+        if now - self._last_flush >= 30.0:
             self._last_flush = now
             self._flush()
 

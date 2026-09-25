@@ -5067,9 +5067,14 @@ def api_status():
     live_recording = 0
     if _live:
         try:
-            snap = _live.get_snapshot()
-            live_running = int((snap.get("summary") or {}).get("running", 0))
-            live_recording = int((snap.get("summary") or {}).get("recording", 0))
+            # The header polls this on every tab (~1/s). It used to build the
+            # full 1650-model snapshot inline just to read two counts, and each
+            # build could start a 25 MB live-history rewrite (~6 MB/s to C:).
+            # The background builder keeps health / write speed fresh instead.
+            _ensure_snap_builder()
+            summ = _live.live_summary()  # cheap, cached ~1.5 s
+            live_running = int(summ.get("running", 0))
+            live_recording = int(summ.get("recording", 0))
         except Exception:
             pass
 
@@ -5795,8 +5800,13 @@ def _live_snapshot_builder_loop():
     polled -- and the endpoint returns the most recent pre-built copy instantly
     (stale by at most one build cycle, which is fine for a dashboard)."""
     import time as _t
+    last_build = 0.0
     while True:
-        if _t.monotonic() - _live_last_request["ts"] < 30.0:
+        now = _t.monotonic()
+        # Every ~2 s while the Live tab is polled; otherwise every 30 s, so
+        # health, write speed and history stay current on every tab without
+        # the header rebuilding the snapshot on each request.
+        if now - _live_last_request["ts"] < 30.0 or now - last_build >= 30.0:
             try:
                 data = _live.get_snapshot()
                 with _live_snap_lock:
@@ -5804,6 +5814,7 @@ def _live_snapshot_builder_loop():
                     _live_snap_cache["ts"] = _t.monotonic()
             except Exception:
                 pass
+            last_build = _t.monotonic()
         _t.sleep(2.0)
 
 

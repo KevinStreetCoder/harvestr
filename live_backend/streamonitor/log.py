@@ -51,6 +51,34 @@ except Exception:
     pass
 
 
+class _PlainFormatter(logging.Formatter):
+    def format(self, record):
+        record.msg = _ANSI_RE.sub('', str(record.msg))
+        return super().format(record)
+
+
+_SM_FH = None
+_SM_FH_LOCK = __import__("threading").Lock()
+
+
+def _streamonitor_file_handler(level):
+    """ONE FileHandler (one OS handle) on logs/streamonitor.log, shared by every
+    bot logger. It used to be one per logger name: 1670 open handles to the
+    same file on a 1651-model fleet. %(name)s carries the logger name that used
+    to be baked into each formatter, so the lines read exactly as before."""
+    global _SM_FH
+    with _SM_FH_LOCK:
+        if _SM_FH is None:
+            import os
+            log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+            os.makedirs(log_dir, exist_ok=True)
+            h = logging.FileHandler(os.path.join(log_dir, 'streamonitor.log'), encoding='utf-8')
+            h.setFormatter(_PlainFormatter('%(asctime)s - %(levelname)-8s - %(name)s: %(message)s'))
+            h.setLevel(level)
+            _SM_FH = h
+        return _SM_FH
+
+
 class ColoredFormatter(logging.Formatter):
     """Custom formatter that gets colors from the bot instance."""
     
@@ -129,20 +157,9 @@ class Logger:
             self.logger.setLevel(loglevel)
             self.logger.addHandler(self.handler)
 
-            # Add file handler for persistent logging
+            # Add file handler for persistent logging (one shared handle)
             try:
-                import os
-                log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
-                os.makedirs(log_dir, exist_ok=True)
-                class PlainFormatter(logging.Formatter):
-                    def format(self, record):
-                        record.msg = _ANSI_RE.sub('', str(record.msg))
-                        return super().format(record)
-                file_formatter = PlainFormatter('%(asctime)s - %(levelname)-8s - {}: %(message)s'.format(name))
-                file_handler = logging.FileHandler(os.path.join(log_dir, 'streamonitor.log'), encoding='utf-8')
-                file_handler.setFormatter(file_formatter)
-                file_handler.setLevel(loglevel)
-                self.logger.addHandler(file_handler)
+                self.logger.addHandler(_streamonitor_file_handler(loglevel))
             except Exception:
                 pass
 

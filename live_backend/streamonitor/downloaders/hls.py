@@ -322,8 +322,14 @@ class _RollingM3UWriter:
         an escape inside the quoted URI. Kill switch: STRMNTR_HLS_LOCAL_INIT=0.
         """
         self._init_miss = False
+        # OPT-IN (STRMNTR_HLS_LOCAL_INIT=1), DEFAULT OFF. It passed an offline
+        # fixture, but a live A/B on real StripChat streams (2026-09-25) showed
+        # the opposite of the intent: with it ON the same models split into 2-3
+        # files (first capture dying after ~40 s); with it OFF each recorded one
+        # continuous file. Fleet-wide it raised "Output stalled" from ~2 to ~10
+        # per minute. Cause not yet understood -- keep off until it is.
         if (self.ffmpeg_input == self.path
-                or os.environ.get("STRMNTR_HLS_LOCAL_INIT", "1") == "0"
+                or os.environ.get("STRMNTR_HLS_LOCAL_INIT", "0") != "1"
                 or "#EXT-X-MAP:" not in text):
             return text
 

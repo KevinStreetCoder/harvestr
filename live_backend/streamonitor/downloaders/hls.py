@@ -227,7 +227,7 @@ class _RollingM3UWriter:
 
         # Clean up old files from THIS process only
         for fname in os.listdir(self.model_dir):
-            if fname.endswith(".m3u8") or fname.endswith(".part"):
+            if fname.endswith(".m3u8") or fname.endswith(".part") or fname.startswith("init_"):
                 try:
                     os.remove(os.path.join(self.model_dir, fname))
                 except Exception:
@@ -260,6 +260,9 @@ class _RollingM3UWriter:
                 self.ffmpeg_input = self.index_path
             except Exception:
                 pass  # keep today's direct shape rather than a broken input
+        # fMP4 init segments served from disk (see _localize_init).
+        self._init_files: Dict[str, str] = {}    # remote init URL -> local copy
+        self._init_n = 0
         if self.audio_url:
             # Placeholder audio playlist so ffmpeg always finds the file even if
             # the first mirror hasn't landed yet; _mirror_audio fills in segments.
@@ -297,6 +300,70 @@ class _RollingM3UWriter:
                 time.sleep(0.005)
         with open(self.path, "w", encoding="utf-8") as f:   # still locked: old way
             f.write(text)
+
+    _MAP_RE = re.compile(r'(#EXT-X-MAP:URI=")([^"]+)(")')
+    _MAX_INIT_FILES = 8
+
+    def _localize_init(self, text: str) -> str:
+        """Point EXT-X-MAP at a local copy of the fMP4 init segment.
+
+        ffmpeg's HLS demuxer re-downloads the init section after every playlist
+        reload (~every 2 s per capture) and gives up on the capture after two
+        failed fetches in a row ("Failed to open an initialization section") --
+        on StripChat that was the most common way a live capture ended, about
+        half of all capture ends after the playlist-rewrite race was fixed.
+        Download each distinct init URL once and let ffmpeg read it from disk.
+
+        Keyed by the FULL URL (query included), so a new session or a rotated
+        token is never served a stale init. If the download fails, the remote
+        URI is kept for this poll (today's behaviour) and retried on the next.
+        Absolute path with forward slashes: a relative one is resolved like a
+        URL (a '#' in the tmp path would start a fragment), and a backslash is
+        an escape inside the quoted URI. Kill switch: STRMNTR_HLS_LOCAL_INIT=0.
+        """
+        self._init_miss = False
+        if (self.ffmpeg_input == self.path
+                or os.environ.get("STRMNTR_HLS_LOCAL_INIT", "1") == "0"
+                or "#EXT-X-MAP:" not in text):
+            return text
+
+        def repl(m):
+            uri = m.group(2)
+            if not uri.startswith(("http://", "https://")):
+                return m.group(0)
+            local = self._init_files.get(uri)
+            if local is None:
+                try:
+                    r = self.sess.get(uri, headers=self.headers, timeout=10)
+                    if r.status_code != 200 or not r.content:
+                        self._init_miss = True
+                        return m.group(0)
+                    local = os.path.abspath(
+                        os.path.join(self.model_dir, f"init_{self._init_n}.mp4"))
+                    self._init_n += 1
+                    tmp = local + ".part"
+                    with open(tmp, "wb") as fh:
+                        fh.write(r.content)
+                    os.replace(tmp, local)
+                except Exception as e:
+                    self._init_miss = True
+                    if self.logger:
+                        self.logger.debug(f"init fetch failed, keeping remote: {e}")
+                    return m.group(0)
+                self._init_files[uri] = local
+                # Bound the scratch cache (M3U8_TMP, not the recordings tree).
+                while len(self._init_files) > self._MAX_INIT_FILES:
+                    old = self._init_files.pop(next(iter(self._init_files)))
+                    try:
+                        os.unlink(old)
+                    except OSError:
+                        pass
+            # Forward slashes: inside a quoted attribute ffmpeg's M3U8 parser
+            # treats '\' as an escape and turned C:\a\b into C:ab. Windows and
+            # ffmpeg's file protocol both accept C:/a/b.
+            return m.group(1) + local.replace("\\", "/") + m.group(3)
+
+        return self._MAP_RE.sub(repl, text)
 
     def _finish(self, last_text) -> None:
         """Append EXT-X-ENDLIST so ffmpeg drains what it has and exits rc=0 with a
@@ -467,6 +534,14 @@ class _RollingM3UWriter:
                 if seq is not None:
                     last_seq = seq
 
+                fixed = self._localize_init(fixed)
+                if self._init_miss and not self._ready.is_set():
+                    # ffmpeg hasn't started yet: rather than hand it a remote init
+                    # that just failed (it gives up on two failures), retry on the
+                    # next poll. wait_ready()'s 10 s timeout still bounds this.
+                    self._stop.wait(self.poll_sec)
+                    continue
+
                 # Write if changed
                 if fixed != last_text:
                     if self._stop.is_set():
@@ -526,6 +601,13 @@ class _RollingM3UWriter:
                 os.unlink(pp)
         except Exception:
             pass
+        for p in list(getattr(self, "_init_files", {}).values()):   # cached inits
+            for q in (p, p + ".part"):
+                try:
+                    if os.path.exists(q):
+                        os.unlink(q)
+                except Exception:
+                    pass
         for p in (self.audio_path, self.master_path):   # dual-audio scratch
             try:
                 if os.path.exists(p):
@@ -784,7 +866,13 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
 
     # CRITICAL FIX: Wait for valid playlist with segments
     if not writer.wait_ready(timeout=10):
-        self.logger.error("Playlist writer failed to produce valid playlist")
+        if getattr(writer, "_init_miss", False):
+            # The playlist is fine but its init segment wouldn't download for
+            # 10 s (see _localize_init). Usually a CDN blip: the run loop's
+            # 3-strike gate escalates it if it persists.
+            self.logger.warning("Init segment unreachable for 10s - not starting ffmpeg")
+        else:
+            self.logger.error("Playlist writer failed to produce valid playlist")
         try:
             writer.stop()
         except Exception:

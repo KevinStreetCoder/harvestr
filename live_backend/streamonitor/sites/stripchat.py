@@ -23,6 +23,10 @@ class StripChat(RoomIdBot):
     site = 'StripChat'
     siteslug = 'SC'
     bulk_update = True
+    # A failed attempt is cheap here (master 404 on each CDN host, or the
+    # hls.py fail-fast), and broadcasts often drop and come back within a
+    # minute: retry 15 s, then every 30 s, while the model stays public.
+    drop_retry_sec = 15
 
     _GENDER_MAP = {
         'female': Gender.FEMALE,

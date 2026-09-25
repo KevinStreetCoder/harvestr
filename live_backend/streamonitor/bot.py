@@ -317,6 +317,12 @@ class Bot(Thread):
                                        # erroring bots aren't pinging the
                                        # net every 20s.
     sleep_on_ratelimit: int = 180
+    # Retry pace for a model that is still PUBLIC but whose stream just dropped
+    # or isn't on the CDN yet. None = sleep_on_error * n (60/120/180/240 s).
+    # A site whose failed attempts are cheap can come back faster: the wait is
+    # drop_retry_sec * n, capped at drop_retry_max.
+    drop_retry_sec: Optional[int] = None
+    drop_retry_max: int = 30
     long_offline_timeout: int = 300   # Back to 5 min so bots take longer
                                        # to enter long-offline mode (gives
                                        # them more chances to recover)
@@ -512,6 +518,18 @@ class Bot(Thread):
     def gender_data(self) -> Optional[Dict[str, Any]]:
         """Get gender display data (name, icon, color) for this model's gender."""
         return GENDER_DATA.get(self.gender)
+
+    def _drop_backoff(self) -> float:
+        """Wait before retrying a still-PUBLIC model after a failed capture or a
+        missing stream URL (by consecutive-failure count).
+
+        The default 60/120/180/240 s let StripChat broadcasts that had already
+        come back go unrecorded for 45-170 s after every drop (measured live).
+        Sites with cheap failed attempts set drop_retry_sec to retry sooner."""
+        n = max(1, min(self._consec_dl_fail, 4))
+        if self.drop_retry_sec:
+            return min(self.drop_retry_sec * n, self.drop_retry_max)
+        return self.sleep_on_error * n
 
     def setStatus(self, status: Status, gender: Optional[Gender] = None, country: Optional[str] = None) -> None:
         """Set status from bulk status update (used by BulkStatusManager).
@@ -1098,7 +1116,7 @@ class Bot(Thread):
                                 # Back off a stuck-but-"public" model (e.g. ticket/private
                                 # show the affiliate API still lists as online) so it
                                 # doesn't retry and re-log every cycle.
-                                self._sleep(self.sleep_on_error * min(self._consec_dl_fail, 4))
+                                self._sleep(self._drop_backoff())
                                 continue
                             try:
                                 file = self.genOutFilename()
@@ -1169,7 +1187,7 @@ class Bot(Thread):
                                     self.logger.debug(
                                         f'Recording ended early (transient); re-polling '
                                         f'[{self._consec_dl_fail}/3]')
-                                self._sleep(self.sleep_on_error * min(self._consec_dl_fail, 4))
+                                self._sleep(self._drop_backoff())
                                 continue
                             self.recording = False
                             self._consec_dl_fail = 0

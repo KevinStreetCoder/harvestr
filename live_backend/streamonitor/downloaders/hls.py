@@ -828,9 +828,11 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
             # Usually a restart right after a capture ended, or the show going
             # private between the playlist fetch and the first segment (43 of 93
             # recorded fine on the very next try). WARNING per attempt, ERROR on
-            # the 3rd in a row: the run loop's own escalation line is INFO, and a
-            # real "ffmpeg never writes" breakage must still reach the ERROR log.
-            (self.logger.error if getattr(self, "_consec_dl_fail", 0) >= 2
+            # the attempt that escalates (3rd in a row on the default backoff):
+            # the run loop's own escalation line is INFO, and a real "ffmpeg
+            # never writes" breakage must still reach the ERROR log.
+            _thr = getattr(self, "_dl_fail_threshold", lambda: 3)()
+            (self.logger.error if getattr(self, "_consec_dl_fail", 0) >= _thr - 1
              else self.logger.warning)("Output file does not exist")
             return False
         

@@ -519,17 +519,29 @@ class Bot(Thread):
         """Get gender display data (name, icon, color) for this model's gender."""
         return GENDER_DATA.get(self.gender)
 
-    def _drop_backoff(self) -> float:
+    def _drop_backoff(self, n: Optional[int] = None) -> float:
         """Wait before retrying a still-PUBLIC model after a failed capture or a
         missing stream URL (by consecutive-failure count).
 
         The default 60/120/180/240 s let StripChat broadcasts that had already
         come back go unrecorded for 45-170 s after every drop (measured live).
         Sites with cheap failed attempts set drop_retry_sec to retry sooner."""
-        n = max(1, min(self._consec_dl_fail, 4))
+        n = max(1, min(self._consec_dl_fail if n is None else n, 4))
         if self.drop_retry_sec:
             return min(self.drop_retry_sec * n, self.drop_retry_max)
         return self.sleep_on_error * n
+
+    def _dl_fail_threshold(self) -> int:
+        """Consecutive failed attempts before a PUBLIC model shows ERROR (logged
+        once). 3 on the default backoff, i.e. ~3 min (60 + 120 s) of drop; with
+        a faster drop_retry_sec it takes more attempts to span the same grace,
+        otherwise quicker retries would only turn the card red sooner."""
+        grace = self.sleep_on_error * 3
+        n, slept = 1, 0.0
+        while slept < grace and n < 20:
+            slept += self._drop_backoff(n)
+            n += 1
+        return max(n, 3)
 
     def setStatus(self, status: Status, gender: Optional[Gender] = None, country: Optional[str] = None) -> None:
         """Set status from bulk status update (used by BulkStatusManager).
@@ -1105,14 +1117,15 @@ class Bot(Thread):
                                 # after several CONSECUTIVE failures. (`not video_url`
                                 # also catches the [] some sites return.)
                                 self._consec_dl_fail += 1
-                                if self._consec_dl_fail >= 3:
+                                _thr = self._dl_fail_threshold()
+                                if self._consec_dl_fail >= _thr:
                                     self.sc = Status.ERROR
-                                    if self._consec_dl_fail == 3:  # log ONCE on escalation, not every cycle
+                                    if self._consec_dl_fail == _thr:  # log ONCE on escalation, not every cycle
                                         self.logger.warning(self.status())
                                 else:
                                     self.logger.debug(
                                         f'No stream URL (likely left public); re-polling '
-                                        f'[{self._consec_dl_fail}/3]')
+                                        f'[{self._consec_dl_fail}/{_thr}]')
                                 # Back off a stuck-but-"public" model (e.g. ticket/private
                                 # show the affiliate API still lists as online) so it
                                 # doesn't retry and re-log every cycle.
@@ -1178,15 +1191,16 @@ class Bot(Thread):
                                     if _st is not None:
                                         self.setStatus(_st)   # logs e.g. 'Private show'
                                         continue              # next pass is non-PUBLIC
-                                if self._consec_dl_fail >= 3:
+                                _thr = self._dl_fail_threshold()
+                                if self._consec_dl_fail >= _thr:
                                     self.sc = Status.ERROR
-                                    if self._consec_dl_fail == 3:  # log ONCE on escalation
+                                    if self._consec_dl_fail == _thr:  # log ONCE on escalation
                                         self.log('Recording ended with error')
                                         self.log(self.status())
                                 else:
                                     self.logger.debug(
                                         f'Recording ended early (transient); re-polling '
-                                        f'[{self._consec_dl_fail}/3]')
+                                        f'[{self._consec_dl_fail}/{_thr}]')
                                 self._sleep(self._drop_backoff())
                                 continue
                             self.recording = False

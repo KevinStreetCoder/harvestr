@@ -608,6 +608,9 @@ class StripChat(RoomIdBot):
     # 659 SC bots polling on a loop must not each re-resolve on every cycle.
     _model_ids: Dict[str, str] = {}
     _model_ids_lock = None
+    # username -> HTTP code of the last user-ids lookup that returned no id
+    # (0 = exception/timeout). Only a 404 means the account is gone.
+    _resolve_last: Dict[str, int] = {}
 
     @classmethod
     def _resolveModelId(cls, session, username, headers, logger=None):
@@ -633,18 +636,23 @@ class StripChat(RoomIdBot):
                 f'https://stripchat.com/api/front/users/user-ids/{username}',
                 headers=headers, bucket='api')
             if r.status_code == 404:
+                cls._resolve_last[key] = 404
                 return None
             if r.status_code != 200:
+                cls._resolve_last[key] = r.status_code
                 if logger:
                     logger.debug(f'user-ids lookup HTTP {r.status_code}')
                 return None
             mid = (r.json() or {}).get('id')
         except Exception as e:
+            cls._resolve_last[key] = 0
             if logger:
                 logger.debug(f'user-ids lookup failed: {type(e).__name__}: {e}')
             return None
         if not mid:
+            cls._resolve_last[key] = 200
             return None
+        cls._resolve_last.pop(key, None)
         mid = str(mid)
         with cls._model_ids_lock:
             cls._model_ids[key] = mid
@@ -741,6 +749,27 @@ class StripChat(RoomIdBot):
         self.logger.debug(f"Unknown list status {status!r} for {self.username}")
         return Status.UNKNOWN
 
+    def recheckAfterFailedCapture(self):
+        """One models/list call after a capture failed while this bot was PUBLIC.
+
+        The bulk poller skips PUBLIC bots and the CDN master keeps answering 200
+        after a show goes private, so bot.run() otherwise retries blind: each
+        retry ran ffmpeg for 30 s into a 403 ("No data within 30s", ~100/h).
+        Answers ONLY when the list positively reports a private show; None on
+        any doubt (call failed, model not in the reply, still public, or off --
+        flaky mobile streams often read 'off' for a moment and resume on the
+        next blind retry). Deliberately no /cam fallback (WAF-blocked on VPNs).
+        """
+        if not self.room_id:
+            return None
+        found = self._fetchModelsList(self.session, self.headers,
+                                      [self.room_id], self.logger)
+        entry = (found or {}).get(str(self.room_id))
+        if entry is None or entry.get('status') not in self._PRIVATE_STATUSES:
+            return None
+        self.lastInfo = entry
+        return Status.PRIVATE
+
     @classmethod
     def getStatusBulk(cls, streamers):
         """Bulk status check for all StripChat streamers.
@@ -789,19 +818,29 @@ class StripChat(RoomIdBot):
         # through to the per-model probes below.
         leftover = [s for s in active if not s.room_id]
         with_id = [s for s in active if s.room_id]
-        for i in range(0, len(with_id), cls._LIST_CHUNK):
-            chunk = with_id[i:i + cls._LIST_CHUNK]
+        chunks = [with_id[i:i + cls._LIST_CHUNK]
+                  for i in range(0, len(with_id), cls._LIST_CHUNK)]
+
+        def _poll_chunk(chunk):
             head = chunk[0]
             found = cls._fetchModelsList(head.session, head.headers,
                                          [s.room_id for s in chunk], head.logger)
             if found is None:
-                leftover.extend(chunk)
-                continue
+                return chunk
             for s in chunk:
                 try:
                     s.setStatus(s._statusFromListEntry(found.get(str(s.room_id))))
                 except Exception as e:
                     s.logger.debug(f"list status apply failed: {type(e).__name__}: {e}")
+            return []
+
+        # A few chunks at once. Each request took 5-15 s, so 16 chunks in a row
+        # stretched the SC status cycle to ~3 min and a show going public was
+        # picked up that late. Every chunk goes through a different bot's session.
+        if chunks:
+            with ThreadPoolExecutor(max_workers=4, thread_name_prefix='sc-list') as pool:
+                for failed in pool.map(_poll_chunk, chunks):
+                    leftover.extend(failed)
         active = leftover
         if not active:
             return
@@ -1310,7 +1349,16 @@ class StripChat(RoomIdBot):
         model_id = self.room_id or self._resolveModelId(
             self.session, self.username, self.headers, self.logger)
         if not model_id:
-            return Status.NOTEXIST
+            code = StripChat._resolve_last.get(self.username.lower())
+            if code == 404:
+                return Status.NOTEXIST
+            # Anything else -- a Cloudflare challenge or 403, 429, 5xx, a timeout
+            # or a malformed 200 -- is no proof the account is gone, and NOTEXIST
+            # stops the bot for good (bot.status() sets running=False, which the
+            # fleet list then saves). A boot-time Cloudflare storm stopped six
+            # live models that way. Back off and ask again next cycle.
+            self.logger.debug(f'model id lookup inconclusive (HTTP {code}); will retry')
+            return Status.RATELIMIT if code in (0, 403, 418, 429) else Status.UNKNOWN
         if not self.room_id:
             self.room_id = str(model_id)
         # Same source as getStatusBulk, so a single poll and the bulk poller

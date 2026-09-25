@@ -690,43 +690,47 @@ class LiveManager:
             log.info("[live] bulk poller: no bulk-update sites loaded")
             return None
 
-        def _loop() -> None:
-            log.info(f"[live] bulk poller started for: "
-                     f"{sorted(getattr(c, 'site', '?') for c in bulk_classes)}")
+        # One thread PER SITE. A single loop polled the sites one after the
+        # other, so a slow site held up every other: CamSoda's paced serial
+        # poll (and its stuck edges) plus StripChat's list chunks stretched the
+        # StripChat cycle from the intended ~10 s to ~3 min, and a show going
+        # public was noticed that late.
+        def _poll_site(cls) -> None:
+            name = getattr(cls, "site", cls.__name__)
             while True:
                 try:
-                    # Snapshot the running bots per bulk class
-                    by_class: Dict[type, set] = {}
                     with self._lock:
-                        for rm in self._models.values():
-                            bot = rm.bot
-                            cls = bot.__class__
-                            if cls not in bulk_classes:
-                                continue
-                            if not getattr(bot, "running", False):
-                                continue
-                            by_class.setdefault(cls, set()).add(bot)
-                    # Poll each class's bulk endpoint
-                    for cls, bots in by_class.items():
-                        try:
-                            cls.getStatusBulk(bots)
-                        except Exception as e:
-                            log.debug(f"[live] bulk poll {getattr(cls, 'site', cls.__name__)}: "
-                                      f"{type(e).__name__}: {e}")
+                        bots = {rm.bot for rm in self._models.values()
+                                if rm.bot.__class__ is cls
+                                and getattr(rm.bot, "running", False)}
+                    if bots:
+                        cls.getStatusBulk(bots)
                 except Exception as e:
-                    log.debug(f"[live] bulk poller iter: {type(e).__name__}: {e}")
-                # Cheap attribute compare over the fleet; piggybacks on this
-                # loop so a self-renamed bot is re-keyed within ~10s.
+                    log.debug(f"[live] bulk poll {name}: {type(e).__name__}: {e}")
+                _time.sleep(10)
+
+        def _renames_loop() -> None:
+            # Cheap attribute compare over the fleet, so a self-renamed bot is
+            # re-keyed within ~10 s.
+            while True:
                 try:
                     self._sync_renames()
                 except Exception as e:
                     log.debug(f"[live] sync renames: {type(e).__name__}: {e}")
                 _time.sleep(10)
 
-        t = threading.Thread(target=_loop, name="live-bulk-poller",
-                             daemon=True)
+        log.info(f"[live] bulk poller started for: "
+                 f"{sorted(getattr(c, 'site', '?') for c in bulk_classes)}")
+        threads = []
+        for cls in sorted(bulk_classes, key=lambda c: getattr(c, "site", c.__name__)):
+            t = threading.Thread(target=_poll_site, args=(cls,), daemon=True,
+                                 name=f"live-bulk-{getattr(cls, 'site', cls.__name__)}")
+            t.start()
+            threads.append(t)
+        t = threading.Thread(target=_renames_loop, name="live-bulk-renames", daemon=True)
         t.start()
-        return t
+        threads.append(t)
+        return threads
 
     def _resolve_live_dir(self) -> Path:
         """Live recordings go to config.live.live_output_dir (if set) or
@@ -1290,6 +1294,16 @@ class LiveManager:
                 log.debug(f"  [live] shutdown stop: {e}")
         log.info(f"[live] drained {stopped} recorder(s) for shutdown "
                  f"(running-state deliberately NOT persisted)")
+        # stop-harvestr.bat hard-kills us next (taskkill /F skips atexit), so
+        # persist history transitions still inside LiveHistory's 30 s throttle.
+        h = getattr(self, "_history", None)
+        if h is not None:
+            try:
+                if not h.flush_now():
+                    log.warning("[live] shutdown: live history could not be "
+                                "written; the last transitions are lost")
+            except Exception as e:
+                log.warning(f"[live] shutdown history flush failed: {e}")
         return {"ok": True, "stopped": stopped}
 
     def get_snapshot(self) -> Dict[str, Any]:
@@ -1614,10 +1628,36 @@ class LiveManager:
             lvl = max(lvl, 1)
             reasons.append(f"{err} of {claimed_live} site-live models in ERROR")
         eta = s.get("disk_full_eta_s")
+        # eta counts down to 0 bytes free, but new captures already stop at the
+        # free-space floor (bot.py HARVESTR_MIN_FREE_GB), so warn against that.
+        floor = 0
+        try:
+            from streamonitor.bot import _min_free_bytes as _mfb
+            floor = _mfb()
+        except Exception:
+            pass
+        free = s.get("disk_free_bytes")
+        if eta is not None and floor and free:
+            # Below the floor already: the "new recordings paused" reason covers it.
+            eta = eta * (free - floor) / free if free > floor else None
+        what = "new recordings pause" if floor else "disk fills"
         if eta is not None and eta < 3600:
-            lvl = 2; reasons.append("disk fills in under 1h")
-        elif eta is not None and eta < 6 * 3600:
-            lvl = max(lvl, 1); reasons.append("disk fills in under 6h")
+            lvl = 2; reasons.append(f"{what} in under 1h")
+        elif eta is not None and eta < 12 * 3600:
+            # Nothing frees space automatically (no-delete policy), so warn
+            # while there is still time to move or post-process recordings.
+            lvl = max(lvl, 1); reasons.append(f"{what} in ~{eta / 3600:.0f}h")
+        # New captures held: recordings drive missing, or below its free-space
+        # floor (bot.py HARVESTR_MIN_FREE_GB). Nothing records until it clears.
+        try:
+            from streamonitor.bot import recordings_dir_status as _rds
+            _st = _rds()
+            if not _st.get("available"):
+                lvl = 2
+                reasons.append("new recordings paused: "
+                               + (_st.get("reason") or "recordings drive unavailable"))
+        except Exception:
+            pass
         return {"level": ["healthy", "degraded", "problem"][lvl], "reasons": reasons}
 
     def _disk_summary(self) -> Dict[str, Any]:

@@ -3,6 +3,7 @@
 
 from __future__ import unicode_literals
 import os
+import shutil
 import traceback
 from urllib.parse import urljoin
 import m3u8
@@ -51,10 +52,12 @@ except ImportError:
 # the drive is missing we HOLD: refuse to start new captures, say so once, and
 # keep re-checking so recording resumes by itself the moment it is back.
 _base_lock = Lock()
-_base_state: Dict[str, Any] = {"ok": None, "checked_at": 0.0, "reason": ""}
+_base_state: Dict[str, Any] = {"ok": None, "checked_at": 0.0, "reason": "",
+                               "low_space": False}
 _BASE_RECHECK_S = 30.0
-# Module-level logger: propagates to the root handler Harvestr installs, so
-# these land in logs/live-errors.log alongside the per-bot messages.
+# Module-level logger with no handler of its own: records propagate to the root
+# handlers only (live-errors.log at ERROR, the UI alert ring at WARNING), so the
+# hold transitions are logged at ERROR to be persisted.
 _dirlog = logging.getLogger("streamonitor.recordings_dir")
 
 
@@ -94,6 +97,20 @@ class RecordingsDirUnavailable(OSError):
     """
 
 
+def _min_free_bytes() -> int:
+    """Free-space floor for STARTING a capture (HARVESTR_MIN_FREE_GB, default 20).
+
+    Nothing is ever deleted to make room and nothing spills to the system disk:
+    below the floor new captures simply wait, exactly like a detached drive,
+    and resume by themselves once space is freed. 0 disables the floor."""
+    try:
+        gb = float((os.environ.get("HARVESTR_MIN_FREE_GB") or "20").strip())
+        # nan -> ValueError; inf or an absurd value -> OverflowError
+        return int(max(gb, 0.0) * 1024 ** 3)
+    except (ValueError, OverflowError):
+        return 20 * 1024 ** 3
+
+
 def _recordings_base_ok(force: bool = False) -> bool:
     """Is DOWNLOADS_DIR reachable/creatable right now?
 
@@ -106,25 +123,47 @@ def _recordings_base_ok(force: bool = False) -> bool:
                 and now - _base_state["checked_at"] < _BASE_RECHECK_S):
             return _base_state["ok"]
 
+        low = False
         try:
             os.makedirs(DOWNLOADS_DIR, exist_ok=True)
             ok, reason = True, ""
         except OSError as e:
             ok, reason = False, str(e)
 
+        # A full drive is held the same way as a missing one. Letting the fleet
+        # run into 0 bytes free turns every new capture into an empty file the
+        # no-delete policy then keeps; in-flight captures keep writing.
+        if ok:
+            try:
+                free = shutil.disk_usage(DOWNLOADS_DIR).free
+                need = _min_free_bytes()
+                if need and free < need:
+                    ok, low = False, True
+                    reason = (f"only {free / 1024 ** 3:.1f} GB free, below the "
+                              f"{need / 1024 ** 3:.0f} GB floor (HARVESTR_MIN_FREE_GB)")
+            except OSError:
+                pass
+
         # Log only on transition, so a long outage costs one line, not one per
         # bot per retry.
-        if ok is not _base_state["ok"]:
+        if ok is not _base_state["ok"] or low != _base_state.get("low_space", False):
             if ok:
                 if _base_state["ok"] is not None:
-                    _dirlog.info(
-                        f"Recordings drive {DOWNLOADS_DIR!r} is back — resuming")
+                    _dirlog.warning(
+                        f"Recordings drive {DOWNLOADS_DIR!r} is "
+                        f"{'writable again' if _base_state.get('low_space') else 'back'}"
+                        f" — resuming")
+            elif low:
+                _dirlog.error(
+                    f"Recordings drive {DOWNLOADS_DIR!r} is nearly full ({reason}). "
+                    f"Not starting new recordings until space is freed — nothing "
+                    f"is deleted and nothing is written to the system disk.")
             else:
-                _dirlog.warning(
+                _dirlog.error(
                     f"Recordings drive {DOWNLOADS_DIR!r} is unreachable ({reason}). "
                     f"Holding all recording until it returns — nothing will be "
                     f"written to the system disk.")
-        _base_state.update(ok=ok, checked_at=now, reason=reason)
+        _base_state.update(ok=ok, checked_at=now, reason=reason, low_space=low)
         return ok
 
 
@@ -146,6 +185,7 @@ def recordings_dir_status() -> Dict[str, Any]:
     with _base_lock:
         return {"path": DOWNLOADS_DIR,
                 "available": ok,
+                "low_space": bool(_base_state.get("low_space")),
                 "reason": _base_state["reason"]}
 
 
@@ -481,6 +521,15 @@ class Bot(Thread):
             self.gender = gender
         if country is not None:
             self.country = country
+        # Bulk pollers only ever report OFFLINE; run() promotes a bot that has
+        # been offline longer than long_offline_timeout to LONG_OFFLINE. Taking
+        # the poller's plain OFFLINE demoted it on every cycle and run()
+        # re-promoted it a second later: a 'No stream' + 'Long offline' log pair
+        # per offline bot per poll (93% of streamonitor.log) and a transition
+        # pair in the live history each time. Any other status passes through.
+        if (status == Status.OFFLINE and self.sc == Status.LONG_OFFLINE
+                and getattr(self, "_offline_time", 0) > self.long_offline_timeout):
+            status = Status.LONG_OFFLINE
         self.sc = status
         if self.sc != self.previous_status:
             self.log(self.status())
@@ -866,8 +915,6 @@ class Bot(Thread):
                 self.logger.error("Failed to get video URL")
                 return False
             
-            self.log(colored('Started downloading show', "green", attrs=["bold"]))
-            self.recording = True
             try:
                 file = self.genOutFilename()
             except ModelFolderUnavailable as e:
@@ -882,6 +929,10 @@ class Bot(Thread):
                 # Already logged once globally by _recordings_base_ok().
                 self.recording = False
                 return False
+            # Only claim a start once there is a file to record into: during a
+            # drive hold (missing, or below HARVESTR_MIN_FREE_GB) nothing starts.
+            self.log(colored('Started downloading show', "green", attrs=["bold"]))
+            self.recording = True
             ok = False
             
             try:
@@ -1049,8 +1100,6 @@ class Bot(Thread):
                                 # doesn't retry and re-log every cycle.
                                 self._sleep(self.sleep_on_error * min(self._consec_dl_fail, 4))
                                 continue
-                            self.log('Started downloading show')
-                            self.recording = True
                             try:
                                 file = self.genOutFilename()
                             except ModelFolderUnavailable as e:
@@ -1078,6 +1127,11 @@ class Bot(Thread):
                                 self.recording = False
                                 self._sleep(self.sleep_on_error)
                                 continue
+                            # Only now: a held drive (missing, or below the
+                            # free-space floor) used to log a false start per
+                            # PUBLIC bot every minute.
+                            self.log('Started downloading show')
+                            self.recording = True
                             try:
                                 ret = _record_under_cap(self, video_url, file)
                             except Exception as e:
@@ -1090,6 +1144,22 @@ class Bot(Thread):
                                 # consecutive-failure gate as the no-URL case so the
                                 # card doesn't flap red on every blip.
                                 self._consec_dl_fail += 1
+                                # Bulk sites: the poller skips PUBLIC bots and a
+                                # CDN master can keep answering 200 after a show
+                                # went private, so the loop used to retry blind.
+                                # A site that defines the hook gets one cheap
+                                # status call; it only answers when positive.
+                                _recheck = getattr(self, "recheckAfterFailedCapture", None)
+                                if (_recheck is not None and self.bulk_update
+                                        and self.running and not self.quitting):
+                                    try:
+                                        _st = _recheck()
+                                    except Exception as e:
+                                        self.logger.debug(f"status recheck failed: {type(e).__name__}: {e}")
+                                        _st = None
+                                    if _st is not None:
+                                        self.setStatus(_st)   # logs e.g. 'Private show'
+                                        continue              # next pass is non-PUBLIC
                                 if self._consec_dl_fail >= 3:
                                     self.sc = Status.ERROR
                                     if self._consec_dl_fail == 3:  # log ONCE on escalation
@@ -1349,9 +1419,9 @@ class Bot(Thread):
                         if f.lower().endswith(ext):
                             p = os.path.join(folder, f)
                             try:
-                                if os.path.getsize(p) == 0:
-                                    if _may_delete(p, self.logger, "zero-byte sweep"):
-                                        os.remove(p)
+                                if os.path.getsize(p) == 0 and \
+                                        _may_delete(p, self.logger, "zero-byte sweep"):
+                                    os.remove(p)
                                     self.logger.debug(f"Deleted zero-byte file: {f}")
                             except Exception as e:
                                 self.logger.debug(f"Error checking/removing {f}: {e}")
@@ -1383,8 +1453,16 @@ class Bot(Thread):
                                     continue
                                 if _may_delete(candidate, self.logger, "zero-byte slot"):
                                     os.remove(candidate)
-                                self.logger.debug(f"Removed zero-byte file during numbering: {n}{ext}")
+                                    self.logger.debug(f"Removed zero-byte file during numbering: {n}{ext}")
                             except Exception:
+                                n += 1
+                                continue
+                            if os.path.exists(candidate):
+                                # The no-delete policy kept this 0-byte file. Never
+                                # hand out an existing path: ffmpeg refuses to
+                                # overwrite it (the old hang on "Overwrite? [y/N]",
+                                # now an empty capture on every retry). Skip the
+                                # number instead; the empty file just stays.
                                 n += 1
                                 continue
                         
@@ -1392,11 +1470,13 @@ class Bot(Thread):
                         for sidecar in sidecars_for(candidate):
                             if os.path.exists(sidecar):
                                 try:
-                                    if os.path.getsize(sidecar) == 0:
-                                        if _may_delete(sidecar, self.logger, "zero-byte sidecar"):
-                                            os.remove(sidecar)
+                                    if os.path.getsize(sidecar) == 0 and \
+                                            _may_delete(sidecar, self.logger, "zero-byte sidecar"):
+                                        os.remove(sidecar)
                                         self.logger.debug(f"Removed zero-byte sidecar: {os.path.basename(sidecar)}")
-                                    else:
+                                    if os.path.exists(sidecar):
+                                        # Non-empty, or an empty one the no-delete
+                                        # policy kept: either way the slot is taken.
                                         blocked = True
                                         break
                                 except Exception:
@@ -1409,7 +1489,7 @@ class Bot(Thread):
                         n += 1
             except filelock.Timeout:
                 self.logger.warning("Filename lock timeout, proceeding without lock")
-                return os.path.join(folder, f"1{ext}")
+                return self._first_free_slot(folder, ext)
             except OSError as e:
                 # Returning a filename here regardless meant the caller then
                 # failed to OPEN it, treated that as a normal download failure,
@@ -1426,7 +1506,19 @@ class Bot(Thread):
                     raise ModelFolderUnavailable(
                         f"{folder}: unreadable/corrupted on disk ({e})") from e
                 self.logger.error(f"OS error during filename generation: {e}")
-                return os.path.join(folder, f"1{ext}")
+                return self._first_free_slot(folder, ext)
+
+    @staticmethod
+    def _first_free_slot(folder: str, ext: str) -> str:
+        """Lock-free fallback for genOutFilename: the first N with neither N<ext>
+        nor any of its sidecars on disk. Used to return a fixed '1<ext>', which
+        exists in every established folder, so the capture could not start."""
+        for n in range(1, 100000):
+            stem = os.path.join(folder, str(n))
+            if not any(os.path.exists(stem + s) for s in
+                       (ext, ".tmp.ts", ".ts.tmp", ".segment.tmp", ".part", ".tmp")):
+                return stem + ext
+        return os.path.join(folder, f"1{ext}")
 
     # Video extensions we own. Deliberately excludes .filename.lock and any
     # partial temp artefacts we don't recognise.

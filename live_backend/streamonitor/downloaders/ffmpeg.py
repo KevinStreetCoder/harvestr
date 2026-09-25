@@ -7,6 +7,8 @@ import time
 import subprocess
 import signal
 import re
+import queue
+import threading
 import collections
 from shlex import quote as shlex_quote
 from typing import TYPE_CHECKING
@@ -177,7 +179,10 @@ def getVideoFfmpeg(self: 'Bot', url, filename: str) -> bool:
     def build_cmd():
         """Build FFmpeg command with all necessary parameters."""
         ua, extra_headers = _compose_headers()
-        cmd = [FFMPEG_PATH, '-hide_banner', '-loglevel', 'info', '-user_agent', ua]
+        # -nostdin: ffmpeg must never stop to ask "Overwrite? [y/N]" on the
+        # console -- nobody answers, and the monitor below used to sit in
+        # readline() forever with the bot parked as "recording" a 0-byte file.
+        cmd = [FFMPEG_PATH, '-hide_banner', '-nostdin', '-loglevel', 'info', '-user_agent', ua]
         
         if FFMPEG_READRATE:
             cmd.insert(1, '-re')
@@ -206,10 +211,16 @@ def getVideoFfmpeg(self: 'Bot', url, filename: str) -> bool:
             '-reconnect_streamed', '1',
             '-reconnect_on_network_error', '1',
             '-reconnect_on_http_error', '4xx,5xx',
-            '-reconnect_at_eof', '1',
             '-reconnect_delay_max', str(FFSettings.RECONNECT_DELAY_MAX)
         ])
-        
+        # -reconnect_at_eof treats the normal EOF of every (small) HLS playlist
+        # load as a dropped connection: 0+1+3+7s of reconnect sleeps per load,
+        # three loads at open -> first bytes at ~49s on BongaCams, past the 45s
+        # no-data abort. The HLS demuxer reloads playlists itself, so this only
+        # helps a progressive (non-HLS) body; a bot that needs it opts in.
+        if getattr(self, 'ffmpeg_reconnect_at_eof', False):
+            cmd.extend(['-reconnect_at_eof', '1'])
+
         # HLS-specific options
         if FFSettings.LIVE_LAST_SEGMENTS is not None and hls_supports('live_start_index'):
             cmd.extend(['-live_start_index', f'-{FFSettings.LIVE_LAST_SEGMENTS}'])
@@ -248,7 +259,7 @@ def getVideoFfmpeg(self: 'Bot', url, filename: str) -> bool:
         # for a second -i. Deliberately NOT cmd[1:]: that also caught the
         # global flags (-hide_banner, -loglevel, -progress), and repeating
         # those after -i made the command malformed so ffmpeg wrote nothing.
-        _GLOBAL_ONLY = {"-hide_banner", "-loglevel", "-progress",
+        _GLOBAL_ONLY = {"-hide_banner", "-nostdin", "-loglevel", "-progress",
                         "-stats_period", "-re"}
         _input_opts, _skip = [], False
         for _i, _tok in enumerate(cmd[1:]):
@@ -256,8 +267,8 @@ def getVideoFfmpeg(self: 'Bot', url, filename: str) -> bool:
                 _skip = False
                 continue
             if _tok in _GLOBAL_ONLY:
-                # -hide_banner and -re are bare; the rest take a value.
-                _skip = _tok not in ("-hide_banner", "-re")
+                # -hide_banner, -nostdin and -re are bare; the rest take a value.
+                _skip = _tok not in ("-hide_banner", "-nostdin", "-re")
                 continue
             _input_opts.append(_tok)
         # Input(s). A (video_url, audio_url) tuple means the site split audio
@@ -392,7 +403,25 @@ def getVideoFfmpeg(self: 'Bot', url, filename: str) -> bool:
         self.last_ffmpeg_stats['attempts'] = attempt
         stalled = False
         stall_reason = None
-        
+
+        # Never start ffmpeg on a path that already exists -- on ANY attempt.
+        # ffmpeg (-nostdin, and no -y: that would overwrite a recording) exits
+        # rc 0 on an existing output, which reads as success with nothing
+        # recorded. A restart therefore continues in the next free file, and
+        # genOutFilename's answer is re-checked because its lock-timeout/OSError
+        # fallbacks return '<folder>/1<ext>' unconditionally. It never deletes
+        # anything and stays on the recordings drive (no C: fallback).
+        if SEGMENT_TIME is None and \
+                os.path.exists(os.path.splitext(filename)[0] + EXT_SINGLE):
+            try:
+                filename = self.genOutFilename()
+            except Exception as e:
+                self.logger.warning(f"No free output file ({e}); ending capture")
+                break
+            if os.path.exists(os.path.splitext(filename)[0] + EXT_SINGLE):
+                self.logger.warning(f"Output {filename} already exists; not starting ffmpeg")
+                break
+
         cmd = build_cmd()
         if DEBUG:
             try:
@@ -416,10 +445,13 @@ def getVideoFfmpeg(self: 'Bot', url, filename: str) -> bool:
                     'HTTP_PROXY': _proxy, 'HTTPS_PROXY': _proxy} if _proxy else None
             process = subprocess.Popen(
                 args=cmd,
-                stdin=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
-                universal_newlines=True,
+                # ffmpeg writes UTF-8. The locale codec here is cp1252, and one
+                # undecodable byte (e.g. a non-ASCII name in the output path)
+                # killed the reader while ffmpeg blocked on a full stderr pipe.
+                text=True, encoding='utf-8', errors='replace',
                 bufsize=0,
                 startupinfo=startupinfo,
                 creationflags=creationflags,
@@ -447,12 +479,32 @@ def getVideoFfmpeg(self: 'Bot', url, filename: str) -> bool:
             self._current_output = out_path  # for live write-speed measurement
         
         ring = collections.deque(maxlen=FFSettings.DEBUG_TAIL_LINES)
-        
+
+        # Drain stderr on a helper thread so the checks below run on a clock,
+        # not only when ffmpeg prints a full line. A silent ffmpeg (a prompt, a
+        # hung socket) used to park this loop in readline() and no watchdog ran.
+        _lines = queue.Queue()
+
+        def _drain(pipe=process.stderr, q=_lines):
+            try:
+                for ln in iter(pipe.readline, ''):
+                    q.put(ln)
+            except Exception as e:
+                self.logger.debug(f"ffmpeg stderr reader ended: {e!r}")
+
+        threading.Thread(target=_drain, name=f"ffmpeg-stderr-{process.pid}",
+                         daemon=True).start()
+
+        last_probe_at = 0.0
+
         # Monitor FFmpeg output
         while process.poll() is None and not stopping.stop:
-            line = process.stderr.readline()
+            try:
+                line = _lines.get(timeout=FFSettings.LOOP_SLEEP_SEC)
+            except queue.Empty:
+                line = ''
             now = time.monotonic()
-            
+
             if line:
                 ring.append(line)
                 if len(line) >= FFSettings.STDERR_MIN_APPEND_BYTES:
@@ -501,9 +553,8 @@ def getVideoFfmpeg(self: 'Bot', url, filename: str) -> bool:
                         break
                 else:
                     consecutive_skips = 0
-            else:
-                time.sleep(FFSettings.LOOP_SLEEP_SEC)
-            
+            # (no sleep on an empty read: the queue.get timeout paces the loop)
+
             # Check output file growth
             if SEGMENT_TIME is None and out_path:
                 if os.path.exists(out_path):
@@ -535,8 +586,13 @@ def getVideoFfmpeg(self: 'Bot', url, filename: str) -> bool:
                             pass
             
             # Periodic playlist probe
+            # At most one probe per interval. The loop now wakes every 0.15 s,
+            # and a probe that never sees a change (403 without the Referer
+            # ffmpeg gets, or a frozen playlist) fired on every wake-up.
             if FFSettings.PLAYLIST_PROBE_ENABLED and \
-               (now - last_playlist_change > FFSettings.PLAYLIST_PROBE_INTERVAL_SEC):
+               (now - last_playlist_change > FFSettings.PLAYLIST_PROBE_INTERVAL_SEC) and \
+               (now - last_probe_at >= FFSettings.PLAYLIST_PROBE_INTERVAL_SEC):
+                last_probe_at = now
                 probe_playlist()
             
             # Skip checks during startup grace period
@@ -627,27 +683,68 @@ def getVideoFfmpeg(self: 'Bot', url, filename: str) -> bool:
         # Handle stop request
         if stopping.stop:
             if process and process.poll() is None:
+                # CTRL_BREAK only reaches ffmpeg when we share a console with
+                # it; under pythonw (production) it raises WinError 6, so don't
+                # sit out the full graceful timeout for a signal never sent.
+                delivered = False
+                if sys.platform == 'win32':
+                    try:
+                        process.send_signal(signal.CTRL_BREAK_EVENT)
+                        delivered = True
+                    except Exception:
+                        pass
                 try:
-                    if sys.platform == 'win32':
-                        try:
-                            process.send_signal(signal.CTRL_BREAK_EVENT)
-                        except Exception:
-                            pass
-                    process.wait(timeout=FFSettings.GRACEFUL_QUIT_TIMEOUT_SEC)
+                    process.wait(timeout=FFSettings.GRACEFUL_QUIT_TIMEOUT_SEC if delivered else 0.5)
                 except subprocess.TimeoutExpired:
                     try:
                         process.kill()
+                        process.wait(timeout=5)
                     except Exception:
                         pass
             overall_success = process.returncode in FFSettings.RETCODE_OK
+            try:
+                while True:
+                    ring.append(_lines.get_nowait())
+            except queue.Empty:
+                pass
             tail_debug(list(ring))
             break
         
+        # Keep the last stderr lines the drain thread queued for the debug tail.
+        try:
+            while True:
+                ring.append(_lines.get_nowait())
+        except queue.Empty:
+            pass
+
         ret = process.returncode if process else -1
         tail_debug(list(ring))
-        
+
         # Handle stall
         if stalled:
+            # The monitor broke out but ffmpeg is still running. End it before the
+            # next attempt, or it is orphaned: it keeps downloading into the old
+            # file while the restart records the same stream into a new one.
+            # CTRL_BREAK lets ffmpeg finalize the container, but only when this
+            # process shares a console with it. Under pythonw (production) the
+            # signal cannot be sent, and a frozen input ignores a single one
+            # anyway, so wait for a graceful exit only when it was delivered.
+            if process and process.poll() is None:
+                delivered = False
+                if sys.platform == 'win32':
+                    try:
+                        process.send_signal(signal.CTRL_BREAK_EVENT)
+                        delivered = True
+                    except Exception:
+                        pass  # no shared console (pythonw)
+                try:
+                    process.wait(timeout=FFSettings.GRACEFUL_QUIT_TIMEOUT_SEC if delivered else 0.5)
+                except Exception:
+                    try:
+                        process.kill()
+                        process.wait(timeout=5)
+                    except Exception:
+                        pass
             consecutive_stalls += 1
             self.last_ffmpeg_stats['stalls'] = consecutive_stalls
             self.last_ffmpeg_stats['last_reason'] = stall_reason

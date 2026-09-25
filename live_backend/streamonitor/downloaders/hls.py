@@ -236,6 +236,30 @@ class _RollingM3UWriter:
         self.path = os.path.join(self.model_dir, "rolling.m3u8")
         self.audio_path = os.path.join(self.model_dir, "rolling_audio.m3u8")
         self.master_path = os.path.join(self.model_dir, "master.m3u8")
+        # ffmpeg keeps its -i file open for the whole capture, so on Windows
+        # rolling.m3u8 can't be os.replace()d while ffmpeg reads it directly, and
+        # rewriting it in place leaves it EMPTY for a few ms (measured live: p50
+        # 17ms, max 103ms). A reload landing in that window reads an empty
+        # playlist -> "[hls] Failed to reload playlist 0" -> ffmpeg exits rc=0
+        # -> the bot starts a new file although the stream never stopped. So
+        # ffmpeg reads this static one-variant master instead and re-opens
+        # rolling.m3u8 only for the few ms of each reload, which lets the writer
+        # swap it atomically. Kill switch: STRMNTR_HLS_ATOMIC_PLAYLIST=0.
+        self.index_path = os.path.join(self.model_dir, "index.m3u8")
+        self.ffmpeg_input = self.path
+        if os.environ.get("STRMNTR_HLS_ATOMIC_PLAYLIST", "1") != "0":
+            try:
+                with open(self.index_path, "w", encoding="utf-8") as f:
+                    # ABSOLUTE variant path: ffmpeg resolves a relative variant
+                    # against the master's path as a URL, so a '#' anywhere in
+                    # model_dir (username or tmp root) would start a fragment and
+                    # rolling.m3u8 would be looked up in the wrong directory.
+                    f.write("#EXTM3U\n#EXT-X-VERSION:6\n"
+                            "#EXT-X-STREAM-INF:BANDWIDTH=5000000\n"
+                            + os.path.abspath(self.path) + "\n")
+                self.ffmpeg_input = self.index_path
+            except Exception:
+                pass  # keep today's direct shape rather than a broken input
         if self.audio_url:
             # Placeholder audio playlist so ffmpeg always finds the file even if
             # the first mirror hasn't landed yet; _mirror_audio fills in segments.
@@ -256,6 +280,45 @@ class _RollingM3UWriter:
             except Exception:
                 pass
 
+    def _write_playlist(self, text: str) -> None:
+        """Replace rolling.m3u8 so a concurrent ffmpeg reload never sees it empty."""
+        if self.ffmpeg_input == self.path:      # direct-input shape: old behaviour
+            with open(self.path, "w", encoding="utf-8") as f:
+                f.write(text)
+            return
+        tmp = self.path + ".part"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        for _ in range(40):          # ffmpeg only holds rolling.m3u8 during a reload
+            try:
+                os.replace(tmp, self.path)
+                return
+            except PermissionError:
+                time.sleep(0.005)
+        with open(self.path, "w", encoding="utf-8") as f:   # still locked: old way
+            f.write(text)
+
+    def _finish(self, last_text) -> None:
+        """Append EXT-X-ENDLIST so ffmpeg drains what it has and exits rc=0 with a
+        finalized file, instead of idling until the 60s watchdog kills it."""
+        if last_text:
+            try:
+                self._write_playlist(last_text.rstrip("\n") + "\n#EXT-X-ENDLIST\n")
+            except Exception:
+                pass
+        # Dual-input audio mode: ffmpeg reads rolling_audio.m3u8 as its own -i
+        # and, with the writer gone, would reload it until the 60s watchdog.
+        # Append-only (never truncates), and only this thread writes the file.
+        if self.audio_url:
+            try:
+                with open(self.audio_path, "r", encoding="utf-8") as fh:
+                    a = fh.read()
+                if a.strip() and "#EXT-X-ENDLIST" not in a:
+                    with open(self.audio_path, "a", encoding="utf-8") as fh:
+                        fh.write(("" if a.endswith("\n") else "\n") + "#EXT-X-ENDLIST\n")
+            except Exception:
+                pass
+
     def _mirror_audio(self):
         """Fetch the audio media playlist and mirror it to rolling_audio.m3u8.
         Best-effort: a miss just means a brief audio gap; ffmpeg tolerates it."""
@@ -271,6 +334,8 @@ class _RollingM3UWriter:
             if "#EXTM3U" not in txt:
                 return
             fixed = _rewrite_playlist_abs_and_tokens(self.audio_url, txt)
+            if self._stop.is_set():
+                return   # stop() may already have removed our files
             with open(self.audio_path, "w", encoding="utf-8") as f:
                 f.write(fixed)
         except Exception:
@@ -286,6 +351,8 @@ class _RollingM3UWriter:
 
     def _loop(self):
         last_text = None
+        last_seq = None
+        seq_back = 0
         consecutive_errors = 0
         # Tolerate more transient playlist-fetch blips before giving up. At the
         # 1.5s poll interval this is ~30s of CDN flakiness, so a brief
@@ -334,6 +401,7 @@ class _RollingM3UWriter:
                             except Exception:
                                 pass
                         self._error = "Playlist access forbidden (likely private show)"
+                        self._finish(last_text)
                         break
                     
                     if self.logger and consecutive_errors <= 3:
@@ -341,6 +409,7 @@ class _RollingM3UWriter:
 
                     if consecutive_errors >= max_errors and not _in_vpn_grace():
                         self._error = f"Too many failed fetches ({consecutive_errors})"
+                        self._finish(last_text)
                         break
                     
                     time.sleep(self.poll_sec)
@@ -378,12 +447,32 @@ class _RollingM3UWriter:
                 
                 # Fix URLs
                 fixed = _rewrite_playlist_abs_and_tokens(self.media_url, txt)
-                
+
+                # Upstream restarted the stream (media sequence went backwards,
+                # new init). ffmpeg would wait for sequence numbers above the old
+                # one and sit silent until the 60s watchdog. End this file now so
+                # the bot opens a new one on the new session. Two polls in a row,
+                # so one stale CDN-edge response can't end a healthy capture.
+                m_seq = re.search(r"#EXT-X-MEDIA-SEQUENCE:(\d+)", fixed)
+                seq = int(m_seq.group(1)) if m_seq else None
+                if seq is not None and last_seq is not None and seq + 5 < last_seq and last_text:
+                    seq_back += 1
+                    if seq_back >= 2:
+                        self._finish(last_text)
+                        self._error = f"media sequence reset {last_seq} -> {seq}"
+                        break
+                    self._stop.wait(self.poll_sec)
+                    continue
+                seq_back = 0
+                if seq is not None:
+                    last_seq = seq
+
                 # Write if changed
                 if fixed != last_text:
+                    if self._stop.is_set():
+                        break   # stop() may already have removed our directory
                     try:
-                        with open(self.path, "w", encoding="utf-8") as f:
-                            f.write(fixed)
+                        self._write_playlist(fixed)
                         last_text = fixed
                     except Exception as e:
                         if self.logger:
@@ -401,6 +490,7 @@ class _RollingM3UWriter:
 
                 if consecutive_errors >= max_errors and not _in_vpn_grace():
                     self._error = f"Network errors: {e}"
+                    self._finish(last_text)
                     break
             
             except Exception as e:
@@ -426,11 +516,22 @@ class _RollingM3UWriter:
         except Exception:
             pass
         try:
+            if os.path.exists(self.index_path):
+                os.unlink(self.index_path)
+        except Exception:
+            pass
+        try:
             pp = self.path + ".part"
             if os.path.exists(pp):
                 os.unlink(pp)
         except Exception:
             pass
+        for p in (self.audio_path, self.master_path):   # dual-audio scratch
+            try:
+                if os.path.exists(p):
+                    os.unlink(p)
+            except Exception:
+                pass
         
         # Remove empty dir
         try:
@@ -542,6 +643,19 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
 
     # Resolve master
     text0, code0 = fetch_text(url)
+    if text0 is None and (code0 in (403, 404, 410) or callable(m3u_processor)):
+        # 403/404/410: the show went private or ended (a CDN master can keep
+        # answering 200 after that, so the bot still got a URL). ffmpeg on the
+        # same URL only re-requests it ~6x over ~26s and then trips the 30s
+        # "No data" watchdog -- it never produced a recording this way. With an
+        # m3u_processor (StripChat's mouflon) direct ffmpeg can't even decode the
+        # segment URIs. Nothing to record: let the run loop own the retry.
+        self.logger.debug(f"Playlist fetch {code0} - not starting ffmpeg")
+        try:
+            sess.close()
+        except Exception:
+            pass
+        return False
     if text0 is None:
         self.logger.debug(f"Master fetch failed ({code0}), trying direct FFmpeg")
         ok = _ffmpeg_dump_to_ts(self, url, headers, output_path, ffmpeg_proc_ref)
@@ -611,6 +725,13 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
 
     # Fetch media playlist
     text1, code1 = fetch_text(url)
+    if text1 is None and (code1 in (403, 404, 410) or callable(m3u_processor)):
+        self.logger.debug(f"Media playlist fetch {code1} - not starting ffmpeg")
+        try:
+            sess.close()
+        except Exception:
+            pass
+        return False
     if text1 is None:
         self.logger.debug(f"Media fetch failed ({code1}), trying direct FFmpeg")
         ok = _ffmpeg_dump_to_ts(self, url, headers, output_path, ffmpeg_proc_ref)
@@ -687,7 +808,8 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
         else:
             # Mirror never landed — record video-only rather than fail outright.
             self.logger.warning("audio playlist has no segments yet; recording video-only")
-    ok = _ffmpeg_dump_to_ts(self, writer.path, headers, output_path, ffmpeg_proc_ref,
+    self._last_hls_end_reason = None
+    ok = _ffmpeg_dump_to_ts(self, writer.ffmpeg_input, headers, output_path, ffmpeg_proc_ref,
                             local_m3u=True, audio_path=ff_audio)
 
     # Cleanup
@@ -703,7 +825,13 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
     # Validate output (.tmp.ts file - no rename)
     try:
         if not os.path.exists(output_path):
-            self.logger.error("Output file does not exist")
+            # Usually a restart right after a capture ended, or the show going
+            # private between the playlist fetch and the first segment (43 of 93
+            # recorded fine on the very next try). WARNING per attempt, ERROR on
+            # the 3rd in a row: the run loop's own escalation line is INFO, and a
+            # real "ffmpeg never writes" breakage must still reach the ERROR log.
+            (self.logger.error if getattr(self, "_consec_dl_fail", 0) >= 2
+             else self.logger.warning)("Output file does not exist")
             return False
         
         size = os.path.getsize(output_path)
@@ -718,12 +846,17 @@ def getVideoNativeHLS(self: Bot, url: str, filename: str,  m3u_processor: Option
         if size < 1024:  # Less than 1KB is suspicious
             self.logger.warning(f"Output file is very small ({_format_bytes(size)})")
         
-        self.logger.info(f"Captured {_format_bytes(size)} to {os.path.basename(output_path)}")
+        _why = getattr(self, "_last_hls_end_reason", None)
+        self.logger.info(f"Captured {_format_bytes(size)} to {os.path.basename(output_path)}"
+                         + (f" (ffmpeg: {_why})" if _why else ""))
         return bool(ok) or (size > 0)
     
     except Exception as e:
         self.logger.error(f"Output validation failed: {e}")
         return False
+
+
+_END_REASON_MAX_AGE = 15.0   # s: a give-up line older than this was a recovered blip
 
 
 def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out_path: str, proc_ref: Dict[str, Optional[subprocess.Popen]], local_m3u=False, audio_path: Optional[str] = None) -> bool:
@@ -750,7 +883,6 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
     cmd = [
         FFMPEG_PATH,
         "-hide_banner", "-loglevel", "info", "-nostdin",
-        "-protocol_whitelist", "file,http,https,tcp,tls,crypto,pipe",
         # Resilient live capture: ignore broken DTS, generate PTS, discard
         # corrupt packets. '+nobuffer' was REMOVED — for archival recording we
         # want ffmpeg to buffer; nobuffer made capture hypersensitive to
@@ -763,7 +895,10 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
 
     is_remote = str(url_or_path).startswith(("http://", "https://"))
     # Options that must be repeated for EACH -i (they're per-input, not global).
-    _per_input: List[str] = []
+    # -protocol_whitelist is a per-INPUT option: in the base cmd it only reached
+    # input #0, so the local rolling_audio.m3u8 (2nd -i) fell back to the file
+    # protocol's default 'file,crypto,data' and every https segment was refused.
+    _per_input: List[str] = ["-protocol_whitelist", "file,http,https,tcp,tls,crypto,pipe"]
 
     # HTTP *protocol* options only apply when the INPUT itself is an http(s)
     # URL. Our local rolling .m3u8 (local_m3u=True) is opened via the file
@@ -780,6 +915,13 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
             "-reconnect_at_eof", "1",
             "-reconnect_delay_max", "30",    # was 10
         ])
+    else:
+        # -rw_timeout is a generic URLContext option: unlike -headers/-reconnect
+        # it is accepted for the local playlist, and the HLS demuxer copies it
+        # onto every segment/init request. Without it a segment fetch whose TCP
+        # path dies mid-request (VPN/CDN blip) blocks forever and only the 60s
+        # watchdog ends the capture. 15s of zero I/O >> a 2s segment's fetch.
+        _per_input.extend(["-rw_timeout", "15000000"])
 
     # HLS *demuxer* options apply whether the playlist is remote or our local
     # rolling file — the demuxer fetches the (remote doppiocdn) segments
@@ -883,7 +1025,9 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            universal_newlines=True,
+            # ffmpeg writes UTF-8; the cp1252 locale codec raised on one
+            # undecodable byte and stopped the stderr drain.
+            text=True, encoding="utf-8", errors="replace",
             bufsize=1,
             startupinfo=startupinfo,
             creationflags=creationflags,
@@ -964,11 +1108,20 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
     _wd_thread.start()
 
     # Drain stderr (for logging only; the watchdog above owns stall/abort).
+    end_reason = None
+    end_at = 0.0
     try:
         for line in proc.stderr:
             line = (line or "").rstrip("\r\n")
             if not line:
                 continue
+            # Remember the last demuxer give-up line so an ffmpeg that ends on its
+            # own ("natural" end) can be attributed next to the Captured line.
+            if ("Failed to reload playlist" in line or "failed too many times" in line
+                    or "Failed to open an initialization section" in line
+                    or "Failed to open segment" in line):
+                end_reason = line.strip()[:160]
+                end_at = time.monotonic()
             if DEBUG:
                 self.logger.debug(f"[ffmpeg] {line}")
             low = line.lower()
@@ -999,6 +1152,11 @@ def _ffmpeg_dump_to_ts(self: Bot, url_or_path: str, headers: Dict[str, str], out
     rc = proc.wait()
     _wd_stop.set()
     proc_ref["p"] = None
+    # Only a give-up line from the last 15 s explains the end: an older one was
+    # a blip ffmpeg recovered from, and a deliberate stop is not an ffmpeg end.
+    self._last_hls_end_reason = (
+        end_reason if end_reason and not getattr(self, "stopDownloadFlag", False)
+        and time.monotonic() - end_at <= _END_REASON_MAX_AGE else None)
     
     try:
         proc.stderr.close()

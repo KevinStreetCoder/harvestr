@@ -1,6 +1,8 @@
 import os
 import re
 import time
+import hashlib
+import collections
 import threading
 import requests
 from typing import Optional, Dict, List, Any, Union
@@ -64,102 +66,169 @@ def _getVideoCamSoda(self_bot, url: str, filename: str) -> bool:
     stall_since = time.monotonic()
     MAX_STALL = 45          # seconds with no new data → give up
     POLL_INTERVAL = 2.0     # how often to poll the media playlist
-    init_fetched = False
     init_url_last: Optional[str] = None
+    init_bytes: Optional[bytes] = None
+    fp = None               # opened on the first NEW media segment, not up front
+    reached = False         # did the playlist answer 200 at least once?
+
+    # Cross-capture dedup. When a broadcaster freezes, CamSoda keeps serving the
+    # last 4-segment window (no ENDLIST) while the API still lists the model as
+    # live, so every restart re-downloaded that window into a new, byte-identical
+    # file (29 such copies in one night). Skip segments whose bytes this bot
+    # already wrote in the last few minutes -- a new session has new bytes.
+    _PREV_TTL = 600
+    prev_at, prev_tail = getattr(self_bot, "_cs_prev_hashes", (0.0, ()))
+    prev_tail = tuple(prev_tail)
+    if time.monotonic() - prev_at > _PREV_TTL:
+        prev_tail = ()
+    prev_hashes = frozenset(prev_tail)
+    written = collections.deque(maxlen=64)   # only the tail can be re-served
+
+    def _stalled() -> bool:
+        return time.monotonic() - stall_since > MAX_STALL
+
+    def _write(data: bytes) -> None:
+        nonlocal fp, total_bytes
+        if fp is None:
+            fp = open(output_path, "wb")
+            if init_bytes:
+                fp.write(init_bytes)
+                total_bytes += len(init_bytes)
+        fp.write(data)
+        fp.flush()
+        total_bytes += len(data)
 
     try:
-        with open(output_path, "wb") as fp:
-            while not stop_flag.is_set():
-                # ── fetch media playlist ──
-                try:
-                    r = sess.get(url, headers=headers, timeout=10)
-                    if r.status_code != 200:
-                        consecutive_errors += 1
-                        # 403 = token expired, 500 = stream ended on CDN
-                        if r.status_code in (403, 500):
-                            if consecutive_errors >= 3:
-                                self_bot.logger.warning(
-                                    f"Persistent HTTP {r.status_code} — stream likely ended, stopping capture"
-                                )
-                                break
-                        else:
-                            self_bot.logger.warning(f"Playlist HTTP {r.status_code}")
-                        time.sleep(POLL_INTERVAL)
-                        continue
-                    playlist_text = r.content.decode("utf-8", errors="ignore")
-                    consecutive_errors = 0
-                except Exception as e:
-                    self_bot.logger.warning(f"Playlist fetch error: {e}")
+        while not stop_flag.is_set():
+            # Stall guard on EVERY pass. It used to run only after a successful
+            # playlist fetch, so an edge hanging on an old token (curl 28, 0 bytes)
+            # or answering 404 forever looped for hours -- the UI showed the model
+            # "recording" while it streamed unrecorded on a new URL.
+            if _stalled():
+                if fp is not None:
+                    self_bot.logger.warning("Stream stalled – ending capture")
+                break
+
+            # ── fetch media playlist ──
+            try:
+                r = sess.get(url, headers=headers, timeout=10)
+                if r.status_code != 200:
+                    consecutive_errors += 1
+                    # 403 = token expired, 500 = stream ended on CDN
+                    if r.status_code in (403, 500):
+                        if consecutive_errors >= 3:
+                            self_bot.logger.warning(
+                                f"Persistent HTTP {r.status_code} — stream likely ended, stopping capture"
+                            )
+                            break
+                    elif consecutive_errors == 1:
+                        self_bot.logger.warning(f"Playlist HTTP {r.status_code}")
+                    else:
+                        self_bot.logger.debug(f"Playlist HTTP {r.status_code} (x{consecutive_errors})")
                     time.sleep(POLL_INTERVAL)
                     continue
-
-                # ── parse EXT-X-MAP (init segment) ──
-                map_match = re.search(r'#EXT-X-MAP:URI="([^"]+)"', playlist_text)
-                if map_match:
-                    map_uri = abs_url(map_match.group(1))
-                    if map_uri != init_url_last:
-                        # New init segment – must write it
-                        try:
-                            ri = sess.get(map_uri, headers=headers, timeout=10)
-                            if ri.status_code == 200 and ri.content:
-                                fp.write(ri.content)
-                                fp.flush()
-                                total_bytes += len(ri.content)
-                                stall_since = time.monotonic()
-                                init_url_last = map_uri
-                                init_fetched = True
-                        except Exception:
-                            pass
-
-                # ── collect segment URIs (skip PART lines for simplicity) ──
-                new_segs: list = []
-                for line in playlist_text.splitlines():
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    seg_url = abs_url(line)
-                    if seg_url not in seen_segs:
-                        new_segs.append(seg_url)
-                        seen_segs.add(seg_url)
-
-                # ── download new segments ──
-                for seg_url in new_segs:
-                    if stop_flag.is_set():
-                        break
-                    try:
-                        rs = sess.get(seg_url, headers=headers, timeout=15)
-                        if rs.status_code == 200 and rs.content:
-                            fp.write(rs.content)
-                            fp.flush()
-                            total_bytes += len(rs.content)
-                            stall_since = time.monotonic()
-                    except Exception as e:
-                        self_bot.logger.debug(f"Segment error: {e}")
-
-                # ── stall detection ──
-                if time.monotonic() - stall_since > MAX_STALL:
-                    self_bot.logger.warning("Stream stalled – ending capture")
-                    break
-
-                # ── endlist? ──
-                if "#EXT-X-ENDLIST" in playlist_text:
-                    self_bot.logger.info("Playlist ended (ENDLIST)")
-                    break
-
+                playlist_text = r.content.decode("utf-8", errors="ignore")
+                consecutive_errors = 0
+                reached = True
+            except Exception as e:
+                self_bot.logger.warning(f"Playlist fetch error: {e}")
                 time.sleep(POLL_INTERVAL)
+                continue
+
+            # ── parse EXT-X-MAP (init segment) ──
+            map_match = re.search(r'#EXT-X-MAP:URI="([^"]+)"', playlist_text)
+            if map_match:
+                map_uri = abs_url(map_match.group(1))
+                if map_uri != init_url_last:
+                    try:
+                        ri = sess.get(map_uri, headers=headers, timeout=10)
+                        if ri.status_code == 200 and ri.content:
+                            init_bytes = ri.content
+                            init_url_last = map_uri
+                            if fp is not None:   # init changed mid-capture
+                                fp.write(init_bytes)
+                                fp.flush()
+                                total_bytes += len(init_bytes)
+                    except Exception:
+                        pass
+
+            # ── collect segment URIs (skip PART lines for simplicity) ──
+            new_segs: list = []
+            for line in playlist_text.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                seg_url = abs_url(line)
+                if seg_url not in seen_segs:
+                    new_segs.append(seg_url)
+                    seen_segs.add(seg_url)
+
+            # ── download new segments ──
+            # Bound this loop from the later of the last write and the start of
+            # this pass: a playlist GET that succeeded slowly (cf_session retries,
+            # ~43 s) must not discard the fresh window it just returned. The
+            # top-of-loop _stalled() check still ends a capture that writes nothing.
+            seg_pass_start = time.monotonic()
+            for seg_url in new_segs:
+                # A failing segment GET can take over a minute (cf_session
+                # retries), so the stall guard bounds this loop too.
+                if stop_flag.is_set() or \
+                        time.monotonic() - max(stall_since, seg_pass_start) > MAX_STALL:
+                    break
+                try:
+                    rs = sess.get(seg_url, headers=headers, timeout=15)
+                except Exception as e:
+                    self_bot.logger.debug(f"Segment error: {e}")
+                    continue
+                if rs.status_code == 200 and rs.content:
+                    h = hashlib.blake2b(rs.content, digest_size=16).digest()
+                    if h in prev_hashes or h in written:
+                        continue     # this or the previous capture has it
+                    # open()/write() errors (EACCES, EMFILE, ENOSPC, a corrupt
+                    # folder) must reach the outer handler -- ERROR + False, so
+                    # the bot's 3-strike backoff sees them -- not read as a
+                    # silent "frozen stream" success every ~47 s.
+                    _write(rs.content)
+                    written.append(h)
+                    stall_since = time.monotonic()
+
+            # ── endlist? ──
+            if "#EXT-X-ENDLIST" in playlist_text:
+                self_bot.logger.info("Playlist ended (ENDLIST)")
+                break
+
+            time.sleep(POLL_INTERVAL)
 
     except Exception as e:
         self_bot.logger.error(f"CamSoda download error: {e}")
         return False
+    finally:
+        if fp is not None:
+            try:
+                fp.close()
+            except Exception:
+                pass
+        # What the next capture must not write again. A frozen window can
+        # straddle two captures (freeze, a <4-segment burst, freeze), so keep
+        # the previous tail AND this capture's writes, bounded, oldest first --
+        # replacing it made the two halves alternate as duplicate files.
+        self_bot._cs_prev_hashes = (time.monotonic(), (prev_tail + tuple(written))[-64:])
 
-    # ── validate output ──
-    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-        size = os.path.getsize(output_path)
-        self_bot.logger.info(f"Captured {size / 1024 / 1024:.1f} MB")
-        return True
+    if fp is None:
+        # Nothing new, so no file was created (nothing to clean up either).
+        if reached:
+            # Frozen window we already have: an ordinary end, so the bot
+            # restarts at once on a fresh URL instead of the error backoff.
+            self_bot.logger.info("No new segments (frozen stream) – no file written")
+            return True
+        # The URL never answered (dead edge/token): let the run loop back off
+        # and build a fresh URL from the next status poll.
+        self_bot.logger.warning("Playlist unreachable – no file written")
+        return False
 
-    self_bot.logger.error("No data captured")
-    return False
+    size = os.path.getsize(output_path)
+    self_bot.logger.info(f"Captured {size / 1024 / 1024:.1f} MB")
+    return True
 
 
 class CamSoda(Bot):
